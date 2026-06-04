@@ -70,6 +70,12 @@ The score is computed offline from the observed behavior and ATT&CK techniques
 (it does not require the AI feature), and every contributing reason is listed so
 the call is explainable. A **process tree** (parent → child) is also included.
 
+Detected techniques are mapped across the ATT&CK tactics — Execution,
+Persistence, Privilege Escalation, Defense Evasion, Credential Access,
+Discovery, Lateral Movement, Collection, Command and Control, and Impact — and
+presented in an **"ATT&CK Coverage by Tactic"** section (and an
+`attack_by_tactic` block in the JSON / a tactic column in the HTML dashboard).
+
 For an at-a-glance, shareable view, add `--html` to write a single-file HTML
 dashboard with the verdict, ATT&CK techniques, IOCs, process tree, and activity
 tables:
