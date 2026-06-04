@@ -52,11 +52,16 @@ The --generalize feature will automatically substitute absolute paths with Windo
 # Verdict at a glance
 
 Every report now opens with a **deterministic verdict banner** so you can make
-a quick call on a sample without reading the whole log:
+a quick call on a sample without reading the whole log. It also makes a best
+guess at **what the sample is** (Ransomware, Downloader/Dropper, Backdoor/RAT,
+Infostealer, Worm, Cryptominer, Wiper) and **auto-extracts IOCs** — URLs, public
+IPs, cryptocurrency wallet addresses, and e-mail addresses — from the captured
+command lines, registry data, and file paths:
 
 <pre>
 ==================================================
- VERDICT: Malicious   (risk score 100/100, High confidence)
+ VERDICT: Malicious   (risk score 70/100, High confidence)
+ LIKELY TYPE: Ransomware   (High confidence)
 ==================================================
 Why:
   - Inhibits system recovery (ransomware-like) (Inhibit System Recovery)
