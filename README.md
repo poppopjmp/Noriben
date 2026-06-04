@@ -52,11 +52,16 @@ The --generalize feature will automatically substitute absolute paths with Windo
 # Verdict at a glance
 
 Every report now opens with a **deterministic verdict banner** so you can make
-a quick call on a sample without reading the whole log:
+a quick call on a sample without reading the whole log. It also makes a best
+guess at **what the sample is** (Ransomware, Downloader/Dropper, Backdoor/RAT,
+Infostealer, Worm, Cryptominer, Wiper) and **auto-extracts IOCs** — URLs, public
+IPs, cryptocurrency wallet addresses, and e-mail addresses — from the captured
+command lines, registry data, and file paths:
 
 <pre>
 ==================================================
- VERDICT: Malicious   (risk score 100/100, High confidence)
+ VERDICT: Malicious   (risk score 70/100, High confidence)
+ LIKELY TYPE: Ransomware   (High confidence)
 ==================================================
 Why:
   - Inhibits system recovery (ransomware-like) (Inhibit System Recovery)
@@ -78,11 +83,14 @@ presented in an **"ATT&CK Coverage by Tactic"** section (and an
 
 For an at-a-glance, shareable view, add `--html` to write a single-file HTML
 dashboard with the verdict, ATT&CK techniques, IOCs, process tree, and activity
-tables:
+tables, or `--md` for a Markdown report you can paste into a ticket or wiki:
 
 <pre>
-python Noriben.py --csv sample.csv --html
+python Noriben.py --csv sample.csv --html --md
 </pre>
+
+Run `python Noriben.py --selftest` to validate the analysis engine against a
+built-in synthetic sample (no Procmon required) — handy after install or in CI.
 
 # Automated Triage: IOCs, MITRE ATT&CK & JSON
 

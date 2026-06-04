@@ -5,6 +5,36 @@ This fork tracks upstream [Rurik/Noriben](https://github.com/Rurik/Noriben)
 and adds analyst-focused features on top. Versions follow loose semantic
 versioning.
 
+## [3.2.0] - 2026-06-04
+
+Usability & sharing.
+
+### Added
+- **`--md`** — write a clean Markdown report (`*.report.md`) for tickets, wikis,
+  and pull requests (verdict, classification, ATT&CK by tactic, IOCs, tree).
+- **`--selftest`** — validate the analysis engine against a synthetic sample
+  (no Procmon needed) for a quick install/health check; now also run in CI,
+  including a console-script (`noriben`) smoke test.
+- **`--merge`** now also emits a consolidated ATT&CK Navigator layer
+  (`Noriben_consolidated.navigator.json`) showing technique frequency across
+  runs.
+- `tests/test_reporting.py` (5 cases). Suite total: 122 tests.
+
+## [3.1.0] - 2026-06-04
+
+Answers "what is it?" alongside "is it bad?".
+
+### Added
+- **Threat classification** — a deterministic best guess at the malware
+  category (Ransomware, Downloader/Dropper, Backdoor/RAT, Infostealer, Worm,
+  Cryptominer, Wiper) from the observed ATT&CK techniques and indicators, shown
+  next to the verdict and in the JSON/HTML.
+- **Automatic IOC enrichment** — extracts URLs, public IPv4 addresses,
+  Bitcoin/Ethereum wallet addresses, and e-mail addresses from command lines,
+  registry data, file paths, and network activity. Surfaced in the report,
+  JSON (`enriched_iocs` + `iocs.*`), HTML dashboard, and MISP export.
+- `tests/test_classification.py` (10 cases). Suite total: 117 tests.
+
 ## [3.0.2] - 2026-06-04
 
 ### Added

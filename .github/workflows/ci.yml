@@ -34,6 +34,9 @@ jobs:
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
 
+      - name: Engine self-test
+        run: python Noriben.py --selftest
+
   install:
     name: Dependency install check
     runs-on: ubuntu-latest
@@ -55,3 +58,9 @@ jobs:
 
       - name: Import smoke test
         run: python -c "import Noriben; print('Noriben', Noriben.__VERSION__)"
+
+      - name: Console-script smoke test
+        run: |
+          python -m pip install .
+          noriben --version
+          noriben --selftest
