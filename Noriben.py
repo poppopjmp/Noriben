@@ -8,6 +8,16 @@
 # clean text report and timeline
 #
 # Changelog:
+# Version 2.1.0 - June 2025
+#       New feature: AI-assisted report analysis
+#           Added --ai to send the generated report to an OpenAI-compatible
+#           Chat Completions endpoint (local Ollama, OpenAI, LM Studio, vLLM,
+#           LiteLLM, etc.) for an automated behavioral analysis and risk
+#           assessment. Configurable via --ai-provider/--ai-model/--ai-url or
+#           the [Noriben] ai_* config keys. Output is appended to the report
+#           and saved as a standalone *_AI_Analysis.md file
+#           All AI failures are non-fatal; the standard report is unaffected
+#       Added --version flag
 # Version 2.0.1 - June 2025
 #       Maintenance/support refresh:
 #           Fixed crash in NoribenRead.py from leftover Python 2 unicode() call;
@@ -166,7 +176,7 @@ except ImportError:
     configparser = None
 
 # Below are global internal variables. Do not edit these. ################
-__VERSION__ = '2.0.1'
+__VERSION__ = '2.1.0'
 use_pmc = False
 use_virustotal = False
 vt_results = {}
@@ -269,6 +279,20 @@ def read_config(config_filename):
         print(e)
         time.sleep(5)
         sys.exit(12)
+
+    # Apply defaults for optional/newer settings so older config files keep working
+    ai_defaults = {
+        'ai_enabled': False,
+        'ai_provider': 'ollama',
+        'ai_base_url': '',
+        'ai_model': '',
+        'ai_api_key': '',
+        'ai_timeout': '120',
+        'ai_max_chars': '60000'
+    }
+    for ai_key, ai_value in ai_defaults.items():
+        config.setdefault(ai_key, ai_value)
+
     return config
 
 
@@ -1126,6 +1150,147 @@ def parse_csv(csv_file, report, timeline):
 # End of parse_csv()
 
 
+def generate_ai_analysis(report_lines, config):
+    """
+    Send the generated Noriben report to a Large Language Model to produce a
+    human-readable behavioral analysis of the captured activity.
+
+    Works with any OpenAI-compatible Chat Completions endpoint. This includes
+    a local Ollama instance (which exposes an OpenAI-compatible API at
+    http://localhost:11434/v1) as well as the OpenAI API itself and other
+    compatible gateways (LM Studio, vLLM, LiteLLM, etc.).
+
+    Arguments:
+        report_lines: list of strings comprising the text report
+        config: active configuration dictionary
+    Returns:
+        string of the AI-generated analysis, or '' on any failure
+    """
+    if requests is None:
+        print('[!] AI analysis requested but the "requests" module is not installed.')
+        return ''
+
+    provider = str(config.get('ai_provider', 'ollama')).lower()
+    base_url = str(config.get('ai_base_url', '')).strip()
+    if not base_url:
+        base_url = 'https://api.openai.com/v1' if provider == 'openai' else 'http://localhost:11434/v1'
+    base_url = base_url.rstrip('/')
+
+    model = str(config.get('ai_model', '')).strip()
+    if not model:
+        model = 'gpt-4o-mini' if provider == 'openai' else 'llama3.1'
+    api_key = str(config.get('ai_api_key', '')).strip()
+
+    try:
+        timeout = int(config.get('ai_timeout', 120))
+    except (TypeError, ValueError):
+        timeout = 120
+    try:
+        max_chars = int(config.get('ai_max_chars', 60000))
+    except (TypeError, ValueError):
+        max_chars = 60000
+
+    report_text = '\n'.join(report_lines)
+    truncated = False
+    if max_chars and len(report_text) > max_chars:
+        report_text = report_text[:max_chars]
+        truncated = True
+
+    system_prompt = (
+        'You are an expert malware analyst. You are given a behavioral report '
+        'produced by Noriben, which summarizes Sysinternals Process Monitor '
+        '(Procmon) activity captured while running a sample in a sandbox. '
+        'Analyze the activity and produce a concise Markdown report with these '
+        'sections:\n'
+        '1. Executive Summary (2-3 sentences)\n'
+        '2. Notable Behaviors (processes, file system, registry)\n'
+        '3. Persistence Mechanisms\n'
+        '4. Network Indicators (domains, IPs, URLs)\n'
+        '5. Indicators of Compromise (IOCs)\n'
+        '6. Risk Assessment: classify as Benign, Suspicious, or Malicious, with '
+        'a confidence level and a short justification.\n\n'
+        'Only use information present in the report. Do not invent indicators. '
+        'If the data is insufficient to make a determination, say so explicitly.'
+    )
+    user_prompt = 'Noriben behavioral report:\n\n' + report_text
+    if truncated:
+        user_prompt += '\n\n[Note: the report was truncated for length before analysis.]'
+
+    url = base_url + '/chat/completions'
+    headers = {'Content-Type': 'application/json'}
+    if api_key:
+        headers['Authorization'] = 'Bearer {}'.format(api_key)
+
+    payload = {
+        'model': model,
+        'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_prompt}
+        ],
+        'temperature': 0.2,
+        'stream': False
+    }
+
+    print('[*] Requesting AI analysis from {} (model: {}) ...'.format(url, model))
+    log_debug('[*] AI request to {} using model {}'.format(url, model))
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    except requests.exceptions.RequestException as err:
+        print('[!] AI analysis failed: could not reach endpoint ({})'.format(err))
+        log_debug('[!] AI request exception: {}'.format(err))
+        return ''
+
+    if response.status_code != 200:
+        print('[!] AI analysis failed: HTTP {} - {}'.format(response.status_code, response.text[:200]))
+        log_debug('[!] AI response error {}: {}'.format(response.status_code, response.text[:500]))
+        return ''
+
+    try:
+        data = response.json()
+        content = data['choices'][0]['message']['content'].strip()
+    except (ValueError, KeyError, IndexError, TypeError) as err:
+        print('[!] AI analysis failed: unexpected response format ({})'.format(err))
+        log_debug('[!] AI parse error: {} -- body: {}'.format(err, response.text[:500]))
+        return ''
+
+    return content
+
+
+def append_ai_analysis(report, config, ai_file):
+    """
+    If AI analysis is enabled, generate it, append it to the report list, and
+    save a standalone copy to ai_file. All failures are non-fatal so that the
+    primary Noriben report is always produced.
+
+    Arguments:
+        report: list of report strings (modified in place)
+        config: active configuration dictionary
+        ai_file: path to write the standalone AI analysis to
+    Returns:
+        none
+    """
+    if not config.get('ai_enabled'):
+        return
+
+    analysis = generate_ai_analysis(report, config)
+    if not analysis:
+        return
+
+    report.append('')
+    report.append('')
+    report.append('AI Analysis:')
+    report.append('==================')
+    for line in analysis.splitlines():
+        report.append(line)
+
+    try:
+        with open(ai_file, 'w', encoding='utf-8') as handle:
+            handle.write(analysis)
+        print('[*] Saving AI analysis to: {}'.format(ai_file))
+    except OSError as err:
+        log_debug('[!] Unable to write AI analysis file {}: {}'.format(ai_file, err))
+
+
 def main():
     """
     Main routine, parses arguments and calls other routines
@@ -1157,9 +1322,18 @@ def main():
     parser.add_argument('--output', help='Folder to store output files', required=False)
     parser.add_argument('--yara', help='Folder containing YARA rules', required=False)
     parser.add_argument('--cmd', help='Command line to execute (in quotes)', required=False)
+    parser.add_argument('--ai', action='store_true',
+                        help='Generate an AI behavioral analysis of the report', required=False)
+    parser.add_argument('--ai-provider', help='AI provider for report analysis',
+                        choices=['ollama', 'openai'], required=False)
+    parser.add_argument('--ai-model', help='Model name for AI analysis (e.g. llama3.1, gpt-4o-mini)',
+                        required=False)
+    parser.add_argument('--ai-url', help='Base URL for an OpenAI-compatible AI endpoint '
+                        '(e.g. http://localhost:11434/v1)', required=False)
     parser.add_argument('-d', '--debug', action='store_true', help='Enable debugging', required=False)
     parser.add_argument('--troubleshoot', action='store_true', help='Pause before exiting for troubleshooting',
                         required=False)
+    parser.add_argument('--version', action='version', version='Noriben {}'.format(__VERSION__))
     args = parser.parse_args()
     report = []
     timeline = []
@@ -1177,6 +1351,15 @@ def main():
     if args.debug:
         config['debug'] = True
 
+    # Override AI settings from the command line if provided
+    if args.ai:
+        config['ai_enabled'] = True
+    if args.ai_provider:
+        config['ai_provider'] = args.ai_provider
+    if args.ai_model:
+        config['ai_model'] = args.ai_model
+    if args.ai_url:
+        config['ai_base_url'] = args.ai_url
 
     if not config['virustotal_api_key'] and os.path.exists('virustotal.api'):
         config['virustotal_api_key'] = open('virustotal.api', 'r', encoding='utf-8').readline().strip()
@@ -1286,6 +1469,9 @@ def main():
 
             parse_csv(csv_file, report, timeline)
 
+            ai_file = os.path.join(config['output_folder'], pml_basename + '_AI_Analysis.md')
+            append_ai_analysis(report, config, ai_file)
+
             print('[*] Saving report to: {}'.format(txt_file))
             codecs.open(txt_file, 'w', 'utf-8-sig').write('\r\n'.join(report))
 
@@ -1314,6 +1500,9 @@ def main():
             timeline_file = os.path.join(config['output_folder'], csv_basename + '_timeline.csv')
 
             parse_csv(args.csv, report, timeline)
+
+            ai_file = os.path.join(config['output_folder'], csv_basename + '_AI_Analysis.md')
+            append_ai_analysis(report, config, ai_file)
 
             print('[*] Saving report to: {}'.format(txt_file))
             codecs.open(txt_file, 'w', 'utf-8-sig').write('\r\n'.join(report))
@@ -1415,6 +1604,10 @@ def main():
 
     # Process CSV file, results in 'report' and 'timeline' output lists
     parse_csv(csv_file, report, timeline)
+
+    ai_file = os.path.join(config['output_folder'], 'Noriben_{}_AI_Analysis.md'.format(session_id))
+    append_ai_analysis(report, config, ai_file)
+
     print('[*] Saving report to: {}'.format(txt_file))
     codecs.open(txt_file, 'w', 'utf-8').write('\r\n'.join(report))
 

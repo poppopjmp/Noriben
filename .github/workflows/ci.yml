@@ -31,6 +31,9 @@ jobs:
       - name: Run pyflakes
         run: python -m pyflakes Noriben.py NoribenRead.py NoribenSandbox.py
 
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
   install:
     name: Dependency install check
     runs-on: ubuntu-latest

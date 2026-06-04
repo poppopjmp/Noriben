@@ -47,6 +47,39 @@ You can automate the script for sandbox-usage. Using -t <seconds> to automate ex
 
 The --generalize feature will automatically substitute absolute paths with Windows environment paths for better IOC development. For example, C:\Users\malware_user\AppData\Roaming\malware.exe will be automatically resolved to %AppData%\malware.exe.
 
+# AI-Assisted Report Analysis
+
+Noriben can hand the generated report to a Large Language Model to produce an
+automated behavioral analysis — an executive summary, notable behaviors,
+persistence mechanisms, network/host IOCs, and a Benign/Suspicious/Malicious
+risk assessment. The analysis is appended to the text report and also saved as
+a standalone `*_AI_Analysis.md` file.
+
+It works with **any OpenAI-compatible Chat Completions endpoint**, so you can
+keep everything local with [Ollama](https://ollama.com/) or point it at a hosted
+provider:
+
+<pre>
+# Local, private analysis with Ollama (no data leaves your machine)
+ollama serve
+ollama pull llama3.1
+python Noriben.py --ai --ai-provider ollama --ai-model llama3.1
+
+# Re-analyze an existing capture with a local model
+python Noriben.py --csv Noriben_12_Jan_25.csv --ai
+
+# Use the OpenAI API (or any compatible gateway: LM Studio, vLLM, LiteLLM)
+python Noriben.py --ai --ai-provider openai --ai-model gpt-4o-mini \
+    --ai-url https://api.openai.com/v1
+</pre>
+
+All AI options can also be set persistently in `Noriben.config` under the
+`[Noriben]` section (`ai_enabled`, `ai_provider`, `ai_base_url`, `ai_model`,
+`ai_api_key`, `ai_timeout`, `ai_max_chars`). The OpenAI provider needs an API
+key (`ai_api_key`, or pass it via the endpoint); local Ollama needs none. If the
+endpoint is unreachable the normal report is still produced — AI failures are
+never fatal.
+
 
 ## Requirements & Installation
 
