@@ -5,6 +5,26 @@ This fork tracks upstream [Rurik/Noriben](https://github.com/Rurik/Noriben)
 and adds analyst-focused features on top. Versions follow loose semantic
 versioning.
 
+## [3.0.1] - 2026-06-04
+
+Much broader MITRE ATT&CK mapping.
+
+### Added
+- Greatly expanded behavioral ATT&CK heuristics across **Execution,
+  Persistence, Privilege Escalation, Defense Evasion, Credential Access,
+  Discovery, Lateral Movement, Collection, Command and Control, and Impact**.
+- Every detected technique now carries its **tactic**.
+- New **"ATT&CK Coverage by Tactic"** report section, an `attack_by_tactic`
+  grouping in the JSON report, and a tactic column in the HTML dashboard.
+- Risk scoring extended to weight credential access, destructive impact,
+  lateral movement, exfiltration, privilege escalation, and reconnaissance.
+- `tests/test_attack_map.py` (16 cases). Suite total: 102 tests.
+
+### Fixed
+- Several command-line rules used a leading `\b` before `-`/`/` flags (which can
+  never match), so e.g. `certutil -urlcache`, `bitsadmin /transfer`,
+  `net user /add`, and `taskkill /im` were missed. Now detected.
+
 ## [3.0.0] - 2026-06-04
 
 Major release — make a clear call on a sample at a glance.

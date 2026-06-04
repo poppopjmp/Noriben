@@ -8,6 +8,17 @@
 # clean text report and timeline
 #
 # Changelog:
+# Version 3.0.1 - 04 Jun 2026 (poppopjmp fork)
+#       Much broader MITRE ATT&CK mapping:
+#           Expanded heuristics across Execution, Persistence, Privilege
+#           Escalation, Defense Evasion, Credential Access, Discovery, Lateral
+#           Movement, Collection, Command and Control, and Impact
+#           Every technique now carries its ATT&CK tactic
+#           New "ATT&CK Coverage by Tactic" section in the report, an
+#           attack_by_tactic grouping in the JSON, and a tactic column in the
+#           HTML dashboard
+#           Risk scoring extended to weight credential access, destructive
+#           impact, lateral movement, exfiltration, privesc, and recon
 # Version 3.0.0 - 04 Jun 2026 (poppopjmp fork)
 #       Major release - make a clear call on a sample at a glance:
 #           Deterministic verdict & risk-scoring engine (0-100 score, verdict of
@@ -249,7 +260,7 @@ except ImportError:
     configparser = None
 
 # Below are global internal variables. Do not edit these. ################
-__VERSION__ = '3.0.0'
+__VERSION__ = '3.0.1'
 use_pmc = False
 use_virustotal = False
 vt_results = {}
@@ -1008,40 +1019,107 @@ _CHILD_PID_RE = re.compile(r'\[Child PID:\s*(\d+)\]')
 _NAMED_PIPE_RE = re.compile(r'(?:\\Device\\NamedPipe\\|\\\\\.\\pipe\\|\\pipe\\)(?P<name>[^\t]+)', re.I)
 _MUTEX_RE = re.compile(r'\\BaseNamedObjects\\(?P<name>[^\t]+)', re.I)
 
-# Heuristic MITRE ATT&CK rules. Each entry: (compiled_regex, technique_id, name)
-# Applied to registry keys, created-file paths, and process command lines.
+# Heuristic MITRE ATT&CK rules. Each entry is a 4-tuple:
+#   (compiled_regex, technique_id, technique_name, tactic)
+# applied to registry keys, created-file paths, and process command lines.
+# This is a best-effort behavioral map; it is not exhaustive and favors
+# low-false-positive signals an analyst can confirm.
 _REGISTRY_ATTACK_RULES = [
-    (re.compile(r'\\CurrentVersion\\Run(Once)?\b', re.I), 'T1547.001', 'Registry Run Keys / Startup Folder'),
-    (re.compile(r'\\Policies\\Explorer\\Run\b', re.I), 'T1547.001', 'Registry Run Keys / Startup Folder'),
-    (re.compile(r'\\CurrentVersion\\Windows\\(Load|Run)\b', re.I), 'T1547.001', 'Registry Run Keys / Startup Folder'),
-    (re.compile(r'\\Winlogon\b', re.I), 'T1547.004', 'Winlogon Helper DLL'),
-    (re.compile(r'\\CurrentControlSet\\Services\\', re.I), 'T1543.003', 'Create or Modify System Process: Windows Service'),
-    (re.compile(r'\\Image File Execution Options\\', re.I), 'T1546.012', 'Image File Execution Options Injection'),
-    (re.compile(r'AppInit_DLLs', re.I), 'T1546.010', 'AppInit DLLs'),
-    (re.compile(r'\\CurrentVersion\\Explorer\\(User Shell Folders|Shell Folders)\b', re.I), 'T1547.001', 'Registry Run Keys / Startup Folder'),
+    (re.compile(r'\\CurrentVersion\\Run(Once)?(Ex)?\b', re.I), 'T1547.001', 'Registry Run Keys / Startup Folder', 'Persistence'),
+    (re.compile(r'\\Policies\\Explorer\\Run\b', re.I), 'T1547.001', 'Registry Run Keys / Startup Folder', 'Persistence'),
+    (re.compile(r'\\CurrentVersion\\Windows\\(Load|Run)\b', re.I), 'T1547.001', 'Registry Run Keys / Startup Folder', 'Persistence'),
+    (re.compile(r'\\CurrentVersion\\Explorer\\(User Shell Folders|Shell Folders)\b', re.I), 'T1547.001', 'Registry Run Keys / Startup Folder', 'Persistence'),
+    (re.compile(r'\\Active Setup\\Installed Components\\', re.I), 'T1547.014', 'Active Setup', 'Persistence'),
+    (re.compile(r'\\Winlogon\b', re.I), 'T1547.004', 'Winlogon Helper DLL', 'Persistence'),
+    (re.compile(r'\\CurrentControlSet\\Services\\', re.I), 'T1543.003', 'Create or Modify System Process: Windows Service', 'Persistence'),
+    (re.compile(r'\\Image File Execution Options\\', re.I), 'T1546.012', 'Image File Execution Options Injection', 'Privilege Escalation'),
+    (re.compile(r'AppInit_DLLs', re.I), 'T1546.010', 'AppInit DLLs', 'Persistence'),
+    (re.compile(r'UserInitMprLogonScript', re.I), 'T1037.001', 'Logon Script (Windows)', 'Persistence'),
+    (re.compile(r'\\Software\\Classes\\CLSID\\.*\\InprocServer32', re.I), 'T1546.015', 'Component Object Model Hijacking', 'Persistence'),
+    (re.compile(r'\\Windows Defender\\.*\\(DisableAntiSpyware|DisableRealtimeMonitoring)', re.I), 'T1562.001', 'Impair Defenses: Disable or Modify Tools', 'Defense Evasion'),
 ]
 _FILE_ATTACK_RULES = [
-    (re.compile(r'\\Start Menu\\Programs\\Startup\\', re.I), 'T1547.001', 'Registry Run Keys / Startup Folder'),
-    (re.compile(r'\\System32\\Tasks\\|\\Windows\\Tasks\\', re.I), 'T1053.005', 'Scheduled Task'),
+    (re.compile(r'\\Start Menu\\Programs\\Startup\\', re.I), 'T1547.001', 'Registry Run Keys / Startup Folder', 'Persistence'),
+    (re.compile(r'\\System32\\Tasks\\|\\Windows\\Tasks\\', re.I), 'T1053.005', 'Scheduled Task', 'Persistence'),
 ]
 _CMDLINE_ATTACK_RULES = [
-    (re.compile(r'\bschtasks\b', re.I), 'T1053.005', 'Scheduled Task'),
-    (re.compile(r'\bsc(\.exe)?\b.*\bcreate\b', re.I), 'T1543.003', 'Create or Modify System Process: Windows Service'),
-    (re.compile(r'\bpowershell\b', re.I), 'T1059.001', 'Command and Scripting Interpreter: PowerShell'),
-    (re.compile(r'(?:^|\s)-e(?:nc|ncodedcommand)?\s+[A-Za-z0-9+/=]{16,}', re.I), 'T1027', 'Obfuscated Files or Information'),
-    (re.compile(r'\bcmd(\.exe)?\b\s+/c\b', re.I), 'T1059.003', 'Command and Scripting Interpreter: Windows Command Shell'),
-    (re.compile(r'\b(wscript|cscript)\b', re.I), 'T1059.005', 'Command and Scripting Interpreter: Visual Basic'),
-    (re.compile(r'\bvssadmin\b.*\bdelete\b', re.I), 'T1490', 'Inhibit System Recovery'),
-    (re.compile(r'\bwmic\b.*shadowcopy.*delete', re.I), 'T1490', 'Inhibit System Recovery'),
-    (re.compile(r'\bbcdedit\b', re.I), 'T1490', 'Inhibit System Recovery'),
-    (re.compile(r'\brundll32\b', re.I), 'T1218.011', 'System Binary Proxy Execution: Rundll32'),
-    (re.compile(r'\bregsvr32\b', re.I), 'T1218.010', 'System Binary Proxy Execution: Regsvr32'),
-    (re.compile(r'\bmshta\b', re.I), 'T1218.005', 'System Binary Proxy Execution: Mshta'),
-    (re.compile(r'\bcertutil\b', re.I), 'T1140', 'Deobfuscate/Decode Files or Information'),
-    (re.compile(r'\bbitsadmin\b', re.I), 'T1197', 'BITS Jobs'),
-    (re.compile(r'\bnetsh\b.*firewall', re.I), 'T1562.004', 'Impair Defenses: Disable or Modify System Firewall'),
-    (re.compile(r'\battrib\b.*\+h', re.I), 'T1564.001', 'Hide Artifacts: Hidden Files and Directories'),
-    (re.compile(r'\b(taskkill|net\s+stop)\b', re.I), 'T1562.001', 'Impair Defenses: Disable or Modify Tools'),
+    # --- Execution ---
+    (re.compile(r'\bpowershell(\.exe)?\b', re.I), 'T1059.001', 'Command and Scripting Interpreter: PowerShell', 'Execution'),
+    (re.compile(r'\bcmd(\.exe)?\b\s+/[ck]\b', re.I), 'T1059.003', 'Command and Scripting Interpreter: Windows Command Shell', 'Execution'),
+    (re.compile(r'\b(wscript|cscript)(\.exe)?\b', re.I), 'T1059.005', 'Command and Scripting Interpreter: Visual Basic', 'Execution'),
+    (re.compile(r'\bpython(\d|\.exe)?\b', re.I), 'T1059.006', 'Command and Scripting Interpreter: Python', 'Execution'),
+    (re.compile(r'\bwmic\b.*\bprocess\b.*\bcall\b.*\bcreate\b', re.I), 'T1047', 'Windows Management Instrumentation', 'Execution'),
+    (re.compile(r'\bschtasks\b', re.I), 'T1053.005', 'Scheduled Task', 'Persistence'),
+    (re.compile(r'\bsc(\.exe)?\b.*\bcreate\b|\bNew-Service\b', re.I), 'T1543.003', 'Create or Modify System Process: Windows Service', 'Persistence'),
+    # --- Persistence / account ---
+    (re.compile(r'\bnet(\.exe)?\b\s+user\b.*/add\b|\bnet\b\s+localgroup\b.*/add\b', re.I), 'T1136.001', 'Create Account: Local Account', 'Persistence'),
+    (re.compile(r'\breg(\.exe)?\b.*\badd\b.*\\Run', re.I), 'T1547.001', 'Registry Run Keys / Startup Folder', 'Persistence'),
+    # --- Privilege Escalation (UAC bypass LOLBINs) ---
+    (re.compile(r'\b(fodhelper|eventvwr|computerdefaults|sdclt|cmstp|slui)(\.exe)?\b', re.I), 'T1548.002', 'Abuse Elevation Control Mechanism: Bypass UAC', 'Privilege Escalation'),
+    # --- Defense Evasion ---
+    (re.compile(r'(?:^|\s)-e(?:nc|ncodedcommand)?\s+[A-Za-z0-9+/=]{16,}', re.I), 'T1027', 'Obfuscated Files or Information', 'Defense Evasion'),
+    (re.compile(r'\brundll32\b', re.I), 'T1218.011', 'System Binary Proxy Execution: Rundll32', 'Defense Evasion'),
+    (re.compile(r'\bregsvr32\b', re.I), 'T1218.010', 'System Binary Proxy Execution: Regsvr32', 'Defense Evasion'),
+    (re.compile(r'\bmshta\b', re.I), 'T1218.005', 'System Binary Proxy Execution: Mshta', 'Defense Evasion'),
+    (re.compile(r'\bcertutil\b.*\b(decode|-decode)\b', re.I), 'T1140', 'Deobfuscate/Decode Files or Information', 'Defense Evasion'),
+    (re.compile(r'\bnetsh\b.*firewall', re.I), 'T1562.004', 'Impair Defenses: Disable or Modify System Firewall', 'Defense Evasion'),
+    (re.compile(r'\battrib\b.*\+h', re.I), 'T1564.001', 'Hide Artifacts: Hidden Files and Directories', 'Defense Evasion'),
+    (re.compile(r'\btaskkill\b.*/(im|f|pid)\b', re.I), 'T1562.001', 'Impair Defenses: Disable or Modify Tools', 'Defense Evasion'),
+    (re.compile(r'\bSet-MpPreference\b.*\bDisable|Add-MpPreference\b.*\bExclusion', re.I), 'T1562.001', 'Impair Defenses: Disable or Modify Tools', 'Defense Evasion'),
+    (re.compile(r'\b(wevtutil)\b.*\b(cl|clear-log)\b|\bClear-EventLog\b', re.I), 'T1070.001', 'Indicator Removal: Clear Windows Event Logs', 'Defense Evasion'),
+    (re.compile(r'\bfsutil\b.*\busn\b.*\bdeletejournal\b', re.I), 'T1070', 'Indicator Removal', 'Defense Evasion'),
+    (re.compile(r'\b(icacls|cacls|takeown)\b', re.I), 'T1222.001', 'File and Directory Permissions Modification', 'Defense Evasion'),
+    (re.compile(r'\bping\b\s+(?:127\.0\.0\.1|localhost)\s+-n\b', re.I), 'T1497.003', 'Virtualization/Sandbox Evasion: Time Based Evasion', 'Defense Evasion'),
+    # --- Credential Access ---
+    (re.compile(r'\bmimikatz\b|sekurlsa|lsadump', re.I), 'T1003', 'OS Credential Dumping', 'Credential Access'),
+    (re.compile(r'\breg(\.exe)?\b.*\bsave\b.*\\(sam|security|system)\b', re.I), 'T1003.002', 'OS Credential Dumping: Security Account Manager', 'Credential Access'),
+    (re.compile(r'\bcomsvcs\.dll\b.*\bMiniDump\b|\bprocdump\b.*\blsass\b', re.I), 'T1003.001', 'OS Credential Dumping: LSASS Memory', 'Credential Access'),
+    (re.compile(r'\bntdsutil\b|\bntds\.dit\b', re.I), 'T1003.003', 'OS Credential Dumping: NTDS', 'Credential Access'),
+    (re.compile(r'\bvaultcmd\b', re.I), 'T1555', 'Credentials from Password Stores', 'Credential Access'),
+    # --- Discovery ---
+    (re.compile(r'\bwhoami\b|\bquery\s+user\b|\bquser\b', re.I), 'T1033', 'System Owner/User Discovery', 'Discovery'),
+    (re.compile(r'\bsysteminfo\b|\bhostname\b|\bwmic\b.*\b(os|computersystem|bios)\b', re.I), 'T1082', 'System Information Discovery', 'Discovery'),
+    (re.compile(r'\bipconfig\b|\barp\s+-a\b|\broute\s+print\b|\bgetmac\b|\bnetsh\b.*\binterface\b', re.I), 'T1016', 'System Network Configuration Discovery', 'Discovery'),
+    (re.compile(r'\bnetstat\b', re.I), 'T1049', 'System Network Connections Discovery', 'Discovery'),
+    (re.compile(r'\btasklist\b|\bwmic\b.*\bprocess\b.*\bget\b|\bqprocess\b', re.I), 'T1057', 'Process Discovery', 'Discovery'),
+    (re.compile(r'\bnet(\.exe)?\b\s+(view|group|localgroup|user)\b', re.I), 'T1087', 'Account Discovery', 'Discovery'),
+    (re.compile(r'\bnltest\b|\bdsquery\b', re.I), 'T1482', 'Domain Trust Discovery', 'Discovery'),
+    (re.compile(r'\bnet(\.exe)?\b\s+(share|use)\b', re.I), 'T1135', 'Network Share Discovery', 'Discovery'),
+    (re.compile(r'\breg(\.exe)?\b.*\bquery\b', re.I), 'T1012', 'Query Registry', 'Discovery'),
+    (re.compile(r'\b(w32tm|net\s+time)\b', re.I), 'T1124', 'System Time Discovery', 'Discovery'),
+    (re.compile(r'\bsc(\.exe)?\b\s+query\b|\bnet\s+start\b|\btasklist\b.*/svc\b', re.I), 'T1007', 'System Service Discovery', 'Discovery'),
+    (re.compile(r'\b(windefend|mpcmdrun|Get-MpPreference)\b|\bwmic\b.*\bantivirus\b', re.I), 'T1518.001', 'Security Software Discovery', 'Discovery'),
+    # --- Lateral Movement ---
+    (re.compile(r'\bpsexec\b|\bpaexec\b', re.I), 'T1021.002', 'Remote Services: SMB/Windows Admin Shares', 'Lateral Movement'),
+    (re.compile(r'\bnet(\.exe)?\b\s+use\b.*\\\\.*\\(admin\$|ipc\$|c\$)', re.I), 'T1021.002', 'Remote Services: SMB/Windows Admin Shares', 'Lateral Movement'),
+    (re.compile(r'\bmstsc(\.exe)?\b', re.I), 'T1021.001', 'Remote Services: Remote Desktop Protocol', 'Lateral Movement'),
+    (re.compile(r'\bwinrs\b|\bEnter-PSSession\b|\bInvoke-Command\b.*-ComputerName', re.I), 'T1021.006', 'Remote Services: Windows Remote Management', 'Lateral Movement'),
+    (re.compile(r'\bwmic\b\s+/node:', re.I), 'T1047', 'Windows Management Instrumentation', 'Lateral Movement'),
+    # --- Collection ---
+    (re.compile(r'\b(rar|winrar|7z|7za)(\.exe)?\b\s+a\b|\bmakecab\b|\bCompress-Archive\b', re.I), 'T1560.001', 'Archive Collected Data: Archive via Utility', 'Collection'),
+    # --- Command and Control / Ingress Tool Transfer ---
+    (re.compile(r'\bcertutil\b.*[-/](urlcache|split)\b', re.I), 'T1105', 'Ingress Tool Transfer', 'Command and Control'),
+    (re.compile(r'\bbitsadmin\b.*/transfer\b', re.I), 'T1105', 'Ingress Tool Transfer', 'Command and Control'),
+    (re.compile(r'\b(curl|wget)\b', re.I), 'T1105', 'Ingress Tool Transfer', 'Command and Control'),
+    (re.compile(r'\b(DownloadString|DownloadFile|Invoke-WebRequest|Start-BitsTransfer|Net\.WebClient|iwr)\b', re.I), 'T1105', 'Ingress Tool Transfer', 'Command and Control'),
+    (re.compile(r'\bbitsadmin\b', re.I), 'T1197', 'BITS Jobs', 'Defense Evasion'),
+    (re.compile(r'\b(teamviewer|anydesk|ngrok|plink)\b', re.I), 'T1219', 'Remote Access Software', 'Command and Control'),
+    (re.compile(r'\bnetsh\b.*\bportproxy\b|\bplink\b.*-R\b', re.I), 'T1572', 'Protocol Tunneling', 'Command and Control'),
+    # --- Impact ---
+    (re.compile(r'\bvssadmin\b.*\bdelete\b', re.I), 'T1490', 'Inhibit System Recovery', 'Impact'),
+    (re.compile(r'\bwmic\b.*shadowcopy.*delete', re.I), 'T1490', 'Inhibit System Recovery', 'Impact'),
+    (re.compile(r'\bwbadmin\b.*\bdelete\b', re.I), 'T1490', 'Inhibit System Recovery', 'Impact'),
+    (re.compile(r'\bbcdedit\b', re.I), 'T1490', 'Inhibit System Recovery', 'Impact'),
+    (re.compile(r'\b(net(\.exe)?\s+stop|sc(\.exe)?\s+stop)\b', re.I), 'T1489', 'Service Stop', 'Impact'),
+    (re.compile(r'\bformat\b\s+[a-z]:|\bcipher\b\s+/w|\bsdelete\b', re.I), 'T1485', 'Data Destruction', 'Impact'),
+    (re.compile(r'\bshutdown\b\s+/[rs]\b|\bRestart-Computer\b', re.I), 'T1529', 'System Shutdown/Reboot', 'Impact'),
+]
+
+# Canonical tactic ordering for the ATT&CK-by-tactic view (kill-chain order).
+_ATTACK_TACTIC_ORDER = [
+    'Execution', 'Persistence', 'Privilege Escalation', 'Defense Evasion',
+    'Credential Access', 'Discovery', 'Lateral Movement', 'Collection',
+    'Command and Control', 'Exfiltration', 'Impact'
 ]
 
 
@@ -1144,36 +1222,81 @@ def detect_attack_techniques(indicators):
     Arguments:
         indicators: dict produced by analyze_indicators()
     Returns:
-        list of {'id', 'technique', 'evidence'} dicts, sorted by technique id
+        list of {'id', 'technique', 'tactic', 'evidence'} dicts, sorted by id
     """
     techniques = {}
 
-    def add(tid, name, evidence):
-        entry = techniques.setdefault(tid, {'id': tid, 'technique': name, 'evidence': []})
+    def add(tid, name, tactic, evidence):
+        entry = techniques.setdefault(tid, {'id': tid, 'technique': name,
+                                            'tactic': tactic, 'evidence': []})
         if evidence and evidence not in entry['evidence'] and len(entry['evidence']) < 5:
             entry['evidence'].append(evidence)
 
     for item in indicators['registry']:
-        for pattern, tid, name in _REGISTRY_ATTACK_RULES:
+        for pattern, tid, name, tactic in _REGISTRY_ATTACK_RULES:
             if pattern.search(item['key']):
-                add(tid, name, item['key'])
+                add(tid, name, tactic, item['key'])
 
     for item in indicators['files_created']:
-        for pattern, tid, name in _FILE_ATTACK_RULES:
+        for pattern, tid, name, tactic in _FILE_ATTACK_RULES:
             if pattern.search(item['path']):
-                add(tid, name, item['path'])
+                add(tid, name, tactic, item['path'])
 
     for item in indicators['processes']:
-        for pattern, tid, name in _CMDLINE_ATTACK_RULES:
+        for pattern, tid, name, tactic in _CMDLINE_ATTACK_RULES:
             if pattern.search(item['command_line']):
-                add(tid, name, item['command_line'])
+                add(tid, name, tactic, item['command_line'])
 
     if indicators['files_deleted']:
-        add('T1070.004', 'Indicator Removal: File Deletion', indicators['files_deleted'][0])
+        add('T1070.004', 'Indicator Removal: File Deletion', 'Defense Evasion',
+            indicators['files_deleted'][0])
     if indicators['network_hosts']:
-        add('T1071', 'Application Layer Protocol', indicators['network_hosts'][0])
+        add('T1071', 'Application Layer Protocol', 'Command and Control',
+            indicators['network_hosts'][0])
 
     return sorted(techniques.values(), key=lambda t: t['id'])
+
+
+def group_techniques_by_tactic(techniques):
+    """
+    Group detected techniques by ATT&CK tactic in kill-chain order.
+
+    Arguments:
+        techniques: list from detect_attack_techniques()
+    Returns:
+        list of {'tactic', 'techniques': [...]} dicts (only non-empty tactics)
+    """
+    buckets = {}
+    for technique in techniques:
+        buckets.setdefault(technique.get('tactic', 'Other'), []).append(technique)
+    ordered = []
+    for tactic in _ATTACK_TACTIC_ORDER + ['Other']:
+        if buckets.get(tactic):
+            ordered.append({'tactic': tactic,
+                            'techniques': sorted(buckets[tactic], key=lambda t: t['id'])})
+    return ordered
+
+
+def format_attack_matrix(techniques):
+    """
+    Render the detected techniques grouped by ATT&CK tactic (kill-chain order)
+    as report lines.
+
+    Arguments:
+        techniques: list from detect_attack_techniques()
+    Returns:
+        list of report line strings (empty list if nothing detected)
+    """
+    grouped = group_techniques_by_tactic(techniques)
+    if not grouped:
+        return []
+    lines = ['ATT&CK Coverage by Tactic:', '==================']
+    for group in grouped:
+        lines.append('[{}]'.format(group['tactic']))
+        for technique in group['techniques']:
+            lines.append('    {}  {}'.format(technique['id'], technique['technique']))
+    lines.append('')
+    return lines
 
 
 def format_analysis_section(indicators, techniques):
@@ -1261,6 +1384,7 @@ def build_json_report(indicators, techniques, metadata, verdict=None, process_tr
             'attack_techniques': len(techniques)
         },
         'attack_techniques': techniques,
+        'attack_by_tactic': group_techniques_by_tactic(techniques),
         'processes': indicators['processes'],
         'process_tree': process_tree if process_tree is not None else [],
         'files': {
@@ -1291,12 +1415,21 @@ def build_json_report(indicators, techniques, metadata, verdict=None, process_tr
 _SCORE_BUCKETS = [
     (('T1490',), 30, 'Inhibits system recovery (ransomware-like)'),
     (('T1486',), 30, 'Data encrypted for impact (ransomware-like)'),
-    (('T1547', 'T1543', 'T1546', 'T1053', 'T1574', 'T1037'), 20, 'Establishes persistence'),
-    (('T1562', 'T1070', 'T1564', 'T1027', 'T1497', 'T1055', 'T1140'), 15, 'Defense evasion / obfuscation'),
+    (('T1003',), 25, 'Credential dumping'),
+    (('T1547', 'T1543', 'T1546', 'T1053', 'T1574', 'T1037', 'T1136'), 20, 'Establishes persistence'),
+    (('T1485', 'T1489', 'T1491', 'T1561'), 18, 'Destructive / impact actions'),
+    (('T1562', 'T1070', 'T1564', 'T1027', 'T1497', 'T1055', 'T1140', 'T1222'), 15, 'Defense evasion / obfuscation'),
+    (('T1548',), 15, 'Privilege escalation (UAC bypass)'),
+    (('T1021', 'T1570', 'T1569'), 12, 'Lateral movement'),
     (('T1218',), 12, 'Proxied execution via signed binary (LOLBIN)'),
-    (('T1059',), 10, 'Script / command interpreter execution'),
+    (('T1048', 'T1567', 'T1041'), 12, 'Exfiltration'),
+    (('T1219', 'T1572', 'T1090'), 12, 'Remote access / tunneling'),
+    (('T1059', 'T1047'), 10, 'Script / command interpreter execution'),
     (('T1071', 'T1105', 'T1571', 'T1095'), 10, 'Network / command-and-control activity'),
     (('T1197',), 8, 'BITS jobs'),
+    (('T1560',), 6, 'Collection / archiving of data'),
+    (('T1082', 'T1057', 'T1016', 'T1049', 'T1087', 'T1135', 'T1012', 'T1033',
+      'T1124', 'T1007', 'T1518', 'T1482'), 5, 'Host/network reconnaissance'),
 ]
 
 _EXECUTABLE_EXTS = ('.exe', '.dll', '.scr', '.sys', '.com', '.cpl')
@@ -1488,7 +1621,7 @@ def build_yara_rule(indicators, rule_name='Noriben_Suspected_Sample', hash_type=
     # in the binary, so they make useful YARA strings.
     for item in indicators.get('registry', []):
         key = item.get('key', '')
-        if any(pattern.search(key) for pattern, _tid, _name in _REGISTRY_ATTACK_RULES):
+        if any(pattern.search(key) for pattern, _tid, _name, _tac in _REGISTRY_ATTACK_RULES):
             leaf = key.rstrip('\\').split('\\')[-1]
             add_string('reg', leaf)
 
@@ -1727,7 +1860,7 @@ def build_sigma_rules(indicators, techniques, metadata):
             ['attack.execution']))
 
     persistence_keys = sorted({item['key'] for item in indicators.get('registry', [])
-                               if any(p.search(item['key']) for p, _i, _n in _REGISTRY_ATTACK_RULES)})
+                               if any(p.search(item['key']) for p, _i, _n, _t in _REGISTRY_ATTACK_RULES)})
     if persistence_keys:
         rules.append(new_rule(
             'Noriben - Registry Persistence Modification',
@@ -1762,7 +1895,7 @@ def build_sigma_rules(indicators, techniques, metadata):
             ['attack.defense_evasion']))
 
     cmd_tokens = sorted({item['command_line'] for item in indicators.get('processes', [])
-                         if any(p.search(item['command_line']) for p, _i, _n in _CMDLINE_ATTACK_RULES)})
+                         if any(p.search(item['command_line']) for p, _i, _n, _t in _CMDLINE_ATTACK_RULES)})
     if cmd_tokens:
         rules.append(new_rule(
             'Noriben - Suspicious Process Command Line',
@@ -2084,14 +2217,20 @@ def build_run_html(report_data, metadata):
         '{}: <b>{}</b>'.format(esc(k.replace('_', ' ')), v) for k, v in summary.items()) + '</p>')
 
     # ATT&CK
-    techniques = report_data.get('attack_techniques', [])
-    if techniques:
-        parts.append('<h2>MITRE ATT&amp;CK techniques</h2><table>'
-                     '<tr><th>ID</th><th>Technique</th><th>Evidence</th></tr>')
-        for tech in techniques:
-            parts.append('<tr><td>{}</td><td>{}</td><td>{}</td></tr>'.format(
-                esc(tech['id']), esc(tech['technique']),
-                esc('; '.join(tech.get('evidence', []))[:200])))
+    by_tactic = report_data.get('attack_by_tactic') or []
+    if by_tactic:
+        total = sum(len(g['techniques']) for g in by_tactic)
+        parts.append('<h2>MITRE ATT&amp;CK techniques <span class="meta">({} techniques across {} tactics)'
+                     '</span></h2><table><tr><th>Tactic</th><th>ID</th><th>Technique</th>'
+                     '<th>Evidence</th></tr>'.format(total, len(by_tactic)))
+        for group in by_tactic:
+            rows = group['techniques']
+            for index, tech in enumerate(rows):
+                tactic_cell = ('<td rowspan="{}"><b>{}</b></td>'.format(len(rows), esc(group['tactic']))
+                               if index == 0 else '')
+                parts.append('<tr>{}<td>{}</td><td>{}</td><td>{}</td></tr>'.format(
+                    tactic_cell, esc(tech['id']), esc(tech['technique']),
+                    esc('; '.join(tech.get('evidence', []))[:200])))
         parts.append('</table>')
 
     # IOCs
@@ -2449,6 +2588,9 @@ def parse_csv(csv_file, report, timeline):
 
     for summary_line in format_analysis_section(indicators, attack_techniques):
         report.append(summary_line)
+
+    for matrix_line in format_attack_matrix(attack_techniques):
+        report.append(matrix_line)
 
     if process_tree:
         report.append('Process Tree:')
