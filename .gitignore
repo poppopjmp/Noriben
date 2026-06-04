@@ -35,7 +35,10 @@ Noriben_consolidated.*
 *.misp.json
 *.suggested.yar
 *.sigma.yml
+*.navigator.json
 *.diff.html
+*.report.html
+*.report.md
 *_NoribenReport.zip
 Noriben_*.log
 

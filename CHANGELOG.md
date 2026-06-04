@@ -5,6 +5,21 @@ This fork tracks upstream [Rurik/Noriben](https://github.com/Rurik/Noriben)
 and adds analyst-focused features on top. Versions follow loose semantic
 versioning.
 
+## [3.2.0] - 2026-06-04
+
+Usability & sharing.
+
+### Added
+- **`--md`** — write a clean Markdown report (`*.report.md`) for tickets, wikis,
+  and pull requests (verdict, classification, ATT&CK by tactic, IOCs, tree).
+- **`--selftest`** — validate the analysis engine against a synthetic sample
+  (no Procmon needed) for a quick install/health check; now also run in CI,
+  including a console-script (`noriben`) smoke test.
+- **`--merge`** now also emits a consolidated ATT&CK Navigator layer
+  (`Noriben_consolidated.navigator.json`) showing technique frequency across
+  runs.
+- `tests/test_reporting.py` (5 cases). Suite total: 122 tests.
+
 ## [3.1.0] - 2026-06-04
 
 Answers "what is it?" alongside "is it bad?".

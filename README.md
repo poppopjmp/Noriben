@@ -83,11 +83,14 @@ presented in an **"ATT&CK Coverage by Tactic"** section (and an
 
 For an at-a-glance, shareable view, add `--html` to write a single-file HTML
 dashboard with the verdict, ATT&CK techniques, IOCs, process tree, and activity
-tables:
+tables, or `--md` for a Markdown report you can paste into a ticket or wiki:
 
 <pre>
-python Noriben.py --csv sample.csv --html
+python Noriben.py --csv sample.csv --html --md
 </pre>
+
+Run `python Noriben.py --selftest` to validate the analysis engine against a
+built-in synthetic sample (no Procmon required) — handy after install or in CI.
 
 # Automated Triage: IOCs, MITRE ATT&CK & JSON
 
