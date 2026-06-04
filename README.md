@@ -77,6 +77,34 @@ Both can be enabled persistently via `json_report` in `Noriben.config`. When AI
 analysis is also enabled, this IOC summary is part of what the model sees, so
 its assessment is better grounded in the actual indicators.
 
+The summary also extracts **named pipes** and **mutexes** (common infection
+markers) from the captured activity.
+
+## Sharing & comparing results
+
+Noriben can turn a run into artifacts you can act on:
+
+<pre>
+--gen-yara   Write a suggested YARA rule (*.suggested.yar) built from the
+             behavioral indicators (dropped file names, mutexes, named pipes,
+             network hosts). A starting point to review, not a vetted rule.
+--stix       Export the IOCs as a STIX 2.1 bundle (*.stix.json)
+--misp       Export the IOCs as a MISP event (*.misp.json)
+--diff FILE  Compare this run against a previously saved *.iocs.json baseline
+             and print what was added/removed (processes, files, hashes,
+             registry keys, hosts, pipes, mutexes, ATT&CK techniques)
+</pre>
+
+Example — triage a sample, then diff a second variant against it:
+
+<pre>
+python Noriben.py --csv sample_a.csv --json --gen-yara --stix --misp
+python Noriben.py --csv sample_b.csv --diff sample_a.iocs.json
+</pre>
+
+`--gen-yara`, `--stix`, and `--misp` also have matching `gen_yara`,
+`stix_export`, and `misp_export` keys in `Noriben.config`.
+
 # AI-Assisted Report Analysis
 
 Noriben can hand the generated report to a Large Language Model to produce an

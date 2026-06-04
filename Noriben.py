@@ -8,6 +8,16 @@
 # clean text report and timeline
 #
 # Changelog:
+# Version 2.3.0 - 04 Jun 2026 (poppopjmp fork)
+#       More reverse-engineering value:
+#           Extract named pipes and mutexes (infection markers) from activity
+#           --gen-yara writes a suggested YARA rule built from behavioral
+#           indicators (dropped file names, mutexes, pipes, network hosts)
+#           --diff <baseline.iocs.json> shows what changed between two runs
+#           (added/removed processes, files, hashes, registry, hosts, pipes,
+#           mutexes, and ATT&CK techniques)
+#           --stix exports IOCs as a STIX 2.1 bundle; --misp exports a MISP
+#           event, both for ingestion by threat-intel platforms
 # Version 2.2.0 - 04 Jun 2026 (poppopjmp fork)
 #       New feature: automated triage for reverse engineers
 #           Added a "Behavioral Summary & Indicators of Compromise" section at
@@ -188,6 +198,7 @@ import string
 import sys
 import time
 import traceback
+import uuid
 
 try:
     import yara  # pip yara-python
@@ -212,7 +223,7 @@ except ImportError:
     configparser = None
 
 # Below are global internal variables. Do not edit these. ################
-__VERSION__ = '2.2.0'
+__VERSION__ = '2.3.0'
 use_pmc = False
 use_virustotal = False
 vt_results = {}
@@ -320,6 +331,9 @@ def read_config(config_filename):
     optional_defaults = {
         'disable-file-hash': False,
         'json_report': False,
+        'gen_yara': False,
+        'stix_export': False,
+        'misp_export': False,
         'ai_enabled': False,
         'ai_provider': 'ollama',
         'ai_base_url': '',
@@ -962,6 +976,9 @@ def terminate_procmon(procmonexe):
 _TAGGED_LINE_RE = re.compile(r'^\[(?P<tag>[^\]]+)\]\s+(?P<proc>.+?):(?P<pid>\d+)\s+>\s+(?P<rest>.*)$')
 _HASH_RE = re.compile(r'\[(?:MD5|SHA1|SHA256):\s*(?P<hash>[0-9a-fA-F]{32,64})\]')
 _CHILD_PID_RE = re.compile(r'\[Child PID:\s*(\d+)\]')
+# Named pipes and mutexes (mutants) frequently show up in created-file paths
+_NAMED_PIPE_RE = re.compile(r'(?:\\Device\\NamedPipe\\|\\\\\.\\pipe\\|\\pipe\\)(?P<name>[^\t]+)', re.I)
+_MUTEX_RE = re.compile(r'\\BaseNamedObjects\\(?P<name>[^\t]+)', re.I)
 
 # Heuristic MITRE ATT&CK rules. Each entry: (compiled_regex, technique_id, name)
 # Applied to registry keys, created-file paths, and process command lines.
@@ -1023,7 +1040,9 @@ def analyze_indicators(process_output, file_output, reg_output, net_output, remo
         'registry': [],
         'network_hosts': sorted({protocol_replace(s).strip() for s in remote_servers if s.strip()}),
         'network_connections': list(net_output),
-        'dropped_file_hashes': []
+        'dropped_file_hashes': [],
+        'named_pipes': [],
+        'mutexes': []
     }
 
     for line in process_output:
@@ -1050,6 +1069,18 @@ def analyze_indicators(process_output, file_output, reg_output, net_output, remo
         rest = match.group('rest')
         path = rest.split('\t')[0].strip()
         if tag == 'CreateFile':
+            pipe_match = _NAMED_PIPE_RE.search(path)
+            mutex_match = _MUTEX_RE.search(path)
+            if pipe_match:
+                pipe = pipe_match.group('name').strip()
+                if pipe not in indicators['named_pipes']:
+                    indicators['named_pipes'].append(pipe)
+                continue
+            if mutex_match:
+                mutex = mutex_match.group('name').strip()
+                if mutex not in indicators['mutexes']:
+                    indicators['mutexes'].append(mutex)
+                continue
             hash_match = _HASH_RE.search(rest)
             hashval = hash_match.group('hash') if hash_match else None
             indicators['files_created'].append({'path': path, 'hash': hashval})
@@ -1159,6 +1190,18 @@ def format_analysis_section(indicators, techniques):
             lines.append('  {}'.format(host))
         lines.append('')
 
+    if indicators.get('mutexes'):
+        lines.append('Mutexes (potential infection markers):')
+        for mutex in indicators['mutexes']:
+            lines.append('  {}'.format(mutex))
+        lines.append('')
+
+    if indicators.get('named_pipes'):
+        lines.append('Named pipes:')
+        for pipe in indicators['named_pipes']:
+            lines.append('  {}'.format(pipe))
+        lines.append('')
+
     return lines
 
 
@@ -1182,6 +1225,8 @@ def build_json_report(indicators, techniques, metadata):
             'files_renamed': len(indicators['files_renamed']),
             'registry_writes': len(indicators['registry']),
             'network_hosts': len(indicators['network_hosts']),
+            'named_pipes': len(indicators.get('named_pipes', [])),
+            'mutexes': len(indicators.get('mutexes', [])),
             'attack_techniques': len(techniques)
         },
         'attack_techniques': techniques,
@@ -1196,9 +1241,237 @@ def build_json_report(indicators, techniques, metadata):
             'hosts': indicators['network_hosts'],
             'connections': indicators['network_connections']
         },
+        'named_pipes': indicators.get('named_pipes', []),
+        'mutexes': indicators.get('mutexes', []),
         'iocs': {
             'file_hashes': indicators['dropped_file_hashes'],
-            'hosts': indicators['network_hosts']
+            'hosts': indicators['network_hosts'],
+            'mutexes': indicators.get('mutexes', []),
+            'named_pipes': indicators.get('named_pipes', [])
+        }
+    }
+
+
+def build_yara_rule(indicators, rule_name='Noriben_Suspected_Sample', hash_type='SHA256'):
+    """
+    Generate a *suggested* YARA rule from the run's behavioral indicators
+    (dropped file names, mutexes, named pipes, network hosts). These are
+    behavioral strings that often appear inside the sample; the rule is a
+    starting point for an analyst, not a vetted detection.
+
+    Arguments:
+        indicators: dict from analyze_indicators()
+        rule_name: identifier for the generated rule
+        hash_type: configured hash algorithm name (for the meta block)
+    Returns:
+        string of YARA rule text, or '' if there is nothing worth matching
+    """
+    strings = []
+    seen = set()
+    counters = {'file': 0, 'mutex': 0, 'pipe': 0, 'net': 0}
+
+    def add_string(kind, value):
+        value = (value or '').strip()
+        if not value or value in seen or len(value) < 4:
+            return
+        seen.add(value)
+        escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+        ident = '${}{}'.format(kind, counters[kind])
+        counters[kind] += 1
+        strings.append('        {} = "{}" ascii wide nocase'.format(ident, escaped))
+
+    for entry in indicators.get('files_created', []):
+        basename = entry['path'].rstrip('\\').split('\\')[-1].split('/')[-1]
+        if basename and '.' in basename:
+            add_string('file', basename)
+    for mutex in indicators.get('mutexes', []):
+        add_string('mutex', mutex)
+    for pipe in indicators.get('named_pipes', []):
+        add_string('pipe', pipe)
+    for host in indicators.get('network_hosts', []):
+        add_string('net', host)
+
+    if not strings:
+        return ''
+
+    meta = ['        author = "Noriben v{}"'.format(__VERSION__),
+            '        description = "Auto-suggested from dynamic analysis - review before use"',
+            '        date = "{}"'.format(datetime.datetime.now().strftime('%Y-%m-%d'))]
+    for dropped in indicators.get('dropped_file_hashes', [])[:5]:
+        meta.append('        {} = "{}"'.format(dropped.get('hash_type', hash_type).lower(), dropped['hash']))
+
+    return ('rule {}\n{{\n'.format(re.sub(r'[^A-Za-z0-9_]', '_', rule_name)) +
+            '    meta:\n' + '\n'.join(meta) + '\n' +
+            '    strings:\n' + '\n'.join(strings) + '\n' +
+            '    condition:\n        any of them\n}\n')
+
+
+def diff_reports(old_report, new_report):
+    """
+    Compare two JSON IOC reports (as produced by build_json_report) and return
+    what is new and what disappeared between the runs.
+
+    Arguments:
+        old_report: previously saved report dict (baseline)
+        new_report: current report dict
+    Returns:
+        dict mapping each category to {'added': [...], 'removed': [...]}
+    """
+    def sets(report):
+        return {
+            'processes': {p['command_line'] for p in report.get('processes', []) if p.get('command_line')},
+            'files_created': {f['path'] for f in report.get('files', {}).get('created', [])},
+            'file_hashes': {h['hash'] for h in report.get('iocs', {}).get('file_hashes', [])},
+            'registry': {x['key'] for x in report.get('registry', [])},
+            'network_hosts': set(report.get('network', {}).get('hosts', [])),
+            'mutexes': set(report.get('mutexes', [])),
+            'named_pipes': set(report.get('named_pipes', [])),
+            'attack_techniques': {t['id'] for t in report.get('attack_techniques', [])}
+        }
+
+    old_sets, new_sets = sets(old_report), sets(new_report)
+    diff = {}
+    for category in old_sets:
+        diff[category] = {
+            'added': sorted(new_sets[category] - old_sets[category]),
+            'removed': sorted(old_sets[category] - new_sets[category])
+        }
+    return diff
+
+
+def format_diff_section(diff, baseline_name):
+    """
+    Render a run-to-run diff as report lines.
+
+    Arguments:
+        diff: dict from diff_reports()
+        baseline_name: name/path of the baseline report, for the header
+    Returns:
+        list of report line strings
+    """
+    lines = ['Run-to-Run Diff (baseline: {}):'.format(baseline_name),
+             '==================']
+    labels = [('attack_techniques', 'ATT&CK techniques'), ('processes', 'Processes'),
+              ('files_created', 'Files created'), ('file_hashes', 'File hashes'),
+              ('registry', 'Registry keys'), ('network_hosts', 'Network hosts'),
+              ('mutexes', 'Mutexes'), ('named_pipes', 'Named pipes')]
+    any_change = False
+    for key, label in labels:
+        added = diff.get(key, {}).get('added', [])
+        removed = diff.get(key, {}).get('removed', [])
+        if not added and not removed:
+            continue
+        any_change = True
+        lines.append('{}:'.format(label))
+        for item in added:
+            lines.append('  [+] {}'.format(item[:160]))
+        for item in removed:
+            lines.append('  [-] {}'.format(item[:160]))
+    if not any_change:
+        lines.append('No differences from baseline.')
+    lines.append('')
+    return lines
+
+
+def build_stix_bundle(indicators, metadata):
+    """
+    Assemble a minimal STIX 2.1 bundle of Indicator objects for the run's IOCs
+    (file hashes, network hosts, mutexes). No external library required.
+
+    Arguments:
+        indicators: dict from analyze_indicators()
+        metadata: dict of run metadata (used for timestamps)
+    Returns:
+        dict representing a STIX 2.1 bundle
+    """
+    now = metadata.get('generated') or datetime.datetime.now().isoformat(timespec='seconds')
+    timestamp = now if now.endswith('Z') else now + 'Z'
+    stix_hash_names = {'MD5': 'MD5', 'SHA1': 'SHA-1', 'SHA256': 'SHA-256'}
+    objects = []
+
+    def indicator(name, pattern):
+        return {
+            'type': 'indicator',
+            'spec_version': '2.1',
+            'id': 'indicator--{}'.format(uuid.uuid4()),
+            'created': timestamp,
+            'modified': timestamp,
+            'name': name,
+            'pattern': pattern,
+            'pattern_type': 'stix',
+            'valid_from': timestamp
+        }
+
+    for dropped in indicators.get('dropped_file_hashes', []):
+        hash_name = stix_hash_names.get(dropped.get('hash_type', 'SHA256'), 'SHA-256')
+        objects.append(indicator('Dropped file {}'.format(dropped['hash']),
+                                  "[file:hashes.'{}' = '{}']".format(hash_name, dropped['hash'])))
+    for host in indicators.get('network_hosts', []):
+        try:
+            ipaddress.ip_address(host.split(':')[0])
+            pattern = "[ipv4-addr:value = '{}']".format(host.split(':')[0])
+        except ValueError:
+            pattern = "[domain-name:value = '{}']".format(host)
+        objects.append(indicator('Network host {}'.format(host), pattern))
+    for mutex in indicators.get('mutexes', []):
+        escaped_mutex = mutex.replace('\\', '\\\\').replace("'", "\\'")
+        objects.append(indicator('Mutex {}'.format(mutex),
+                                  "[mutex:name = '{}']".format(escaped_mutex)))
+
+    return {
+        'type': 'bundle',
+        'id': 'bundle--{}'.format(uuid.uuid4()),
+        'objects': objects
+    }
+
+
+def build_misp_event(indicators, metadata):
+    """
+    Assemble a MISP event (JSON) describing the run's IOCs, ready for import
+    via the MISP "Import from... MISP JSON" feature.
+
+    Arguments:
+        indicators: dict from analyze_indicators()
+        metadata: dict of run metadata
+    Returns:
+        dict representing a MISP event
+    """
+    misp_hash_types = {'MD5': 'md5', 'SHA1': 'sha1', 'SHA256': 'sha256'}
+    attributes = []
+
+    def attribute(attr_type, category, value):
+        attributes.append({'type': attr_type, 'category': category,
+                           'value': value, 'to_ids': True})
+
+    for dropped in indicators.get('dropped_file_hashes', []):
+        attribute(misp_hash_types.get(dropped.get('hash_type', 'SHA256'), 'sha256'),
+                  'Payload delivery', dropped['hash'])
+    for entry in indicators.get('files_created', []):
+        basename = entry['path'].rstrip('\\').split('\\')[-1].split('/')[-1]
+        if basename:
+            attribute('filename', 'Payload delivery', basename)
+    for host in indicators.get('network_hosts', []):
+        bare = host.split(':')[0]
+        try:
+            ipaddress.ip_address(bare)
+            attribute('ip-dst', 'Network activity', bare)
+        except ValueError:
+            attribute('domain', 'Network activity', host)
+    for item in indicators.get('registry', []):
+        attribute('regkey', 'Persistence mechanism', item['key'])
+    for mutex in indicators.get('mutexes', []):
+        attribute('mutex', 'Artifacts dropped', mutex)
+    for pipe in indicators.get('named_pipes', []):
+        attribute('named pipe', 'Artifacts dropped', pipe)
+
+    generated = metadata.get('generated', datetime.datetime.now().isoformat(timespec='seconds'))
+    return {
+        'Event': {
+            'info': 'Noriben dynamic analysis {}'.format(metadata.get('command_line') or '').strip(),
+            'date': generated.split('T')[0],
+            'analysis': '2',
+            'threat_level_id': '2',
+            'Attribute': attributes
         }
     }
 
@@ -1445,10 +1718,18 @@ def parse_csv(csv_file, report, timeline):
     time_parse_csv_end = time.time()
 
     # Build structured indicators and heuristic ATT&CK tags for the summary
-    # section and the optional JSON report.
+    # section, the optional JSON report, the diff, and the IOC exports.
     indicators = analyze_indicators(process_output, file_output, reg_output,
                                     net_output, remote_servers, config['hash_type'])
     attack_techniques = detect_attack_techniques(indicators)
+    report_metadata = {
+        'version': __VERSION__,
+        'generated': datetime.datetime.now().isoformat(timespec='seconds'),
+        'command_line': exe_cmdline,
+        'hash_type': config['hash_type'],
+        'source_csv': os.path.basename(csv_file)
+    }
+    json_report_data = build_json_report(indicators, attack_techniques, report_metadata)
 
     report.append('-=] Sandbox Analysis Report generated by Noriben v{}'.format(__VERSION__))
     report.append('-=] https://github.com/Rurik/Noriben')
@@ -1467,6 +1748,19 @@ def parse_csv(csv_file, report, timeline):
 
     for summary_line in format_analysis_section(indicators, attack_techniques):
         report.append(summary_line)
+
+    # Optional run-to-run diff against a previously saved JSON IOC report
+    baseline_path = config.get('diff_against')
+    if baseline_path:
+        try:
+            with open(baseline_path, encoding='utf-8') as baseline_handle:
+                baseline_report = json.load(baseline_handle)
+            diff = diff_reports(baseline_report, json_report_data)
+            for diff_line in format_diff_section(diff, os.path.basename(baseline_path)):
+                report.append(diff_line)
+        except (OSError, ValueError) as err:
+            print('[!] Could not load diff baseline {}: {}'.format(baseline_path, err))
+            log_debug('[!] Diff baseline load failed: {}'.format(err))
 
     report.append('Processes Created:')
     report.append('==================')
@@ -1509,22 +1803,34 @@ def parse_csv(csv_file, report, timeline):
         for error in error_output:
             report.append(error)
 
-    if config.get('json_report'):
-        json_report_file = os.path.splitext(csv_file)[0] + '.iocs.json'
-        metadata = {
-            'version': __VERSION__,
-            'generated': datetime.datetime.now().isoformat(timespec='seconds'),
-            'command_line': exe_cmdline,
-            'hash_type': config['hash_type'],
-            'source_csv': os.path.basename(csv_file)
-        }
+    # Structured IOC exports. Each is independent and non-fatal.
+    output_base = os.path.splitext(csv_file)[0]
+
+    def _write_export(enabled, suffix, label, builder, as_json=True):
+        if not enabled:
+            return
+        path = output_base + suffix
         try:
-            with open(json_report_file, 'w', encoding='utf-8') as json_out:
-                json.dump(build_json_report(indicators, attack_techniques, metadata),
-                          json_out, indent=2, sort_keys=False)
-            print('[*] Saving JSON IOC report to: {}'.format(json_report_file))
+            payload = builder()
+            if not payload:
+                return
+            with open(path, 'w', encoding='utf-8') as handle:
+                if as_json:
+                    json.dump(payload, handle, indent=2, sort_keys=False)
+                else:
+                    handle.write(payload)
+            print('[*] Saving {} to: {}'.format(label, path))
         except OSError as err:
-            log_debug('[!] Unable to write JSON report {}: {}'.format(json_report_file, err))
+            log_debug('[!] Unable to write {} ({}): {}'.format(label, path, err))
+
+    _write_export(config.get('json_report'), '.iocs.json', 'JSON IOC report',
+                  lambda: json_report_data)
+    _write_export(config.get('gen_yara'), '.suggested.yar', 'suggested YARA rule',
+                  lambda: build_yara_rule(indicators, hash_type=config['hash_type']), as_json=False)
+    _write_export(config.get('stix_export'), '.stix.json', 'STIX 2.1 bundle',
+                  lambda: build_stix_bundle(indicators, report_metadata))
+    _write_export(config.get('misp_export'), '.misp.json', 'MISP event',
+                  lambda: build_misp_event(indicators, report_metadata))
 
     if config['debug'] and vt_dump:
         vt_file = os.path.join(config['output_folder'], os.path.splitext(csv_file)[0] + '.vt.json')
@@ -1711,6 +2017,14 @@ def main():
     parser.add_argument('--disable-file-hash', action='store_true', help='Disable hashing new files', required=False)
     parser.add_argument('--json', action='store_true',
                         help='Also write a structured JSON report with IOCs and ATT&CK tags', required=False)
+    parser.add_argument('--gen-yara', action='store_true',
+                        help='Generate a suggested YARA rule from behavioral indicators', required=False)
+    parser.add_argument('--stix', action='store_true',
+                        help='Export IOCs as a STIX 2.1 bundle (*.stix.json)', required=False)
+    parser.add_argument('--misp', action='store_true',
+                        help='Export IOCs as a MISP event (*.misp.json)', required=False)
+    parser.add_argument('--diff', help='Diff this run against a previously saved *.iocs.json baseline',
+                        required=False)
     parser.add_argument('--headless', action='store_true', help='Do not open results on VM after processing',
                         required=False)
     parser.add_argument('--human', action='store_true', help='Perform human activity', required=False)
@@ -1775,6 +2089,14 @@ def main():
 
     if args.json:
         config['json_report'] = True
+    if args.gen_yara:
+        config['gen_yara'] = True
+    if args.stix:
+        config['stix_export'] = True
+    if args.misp:
+        config['misp_export'] = True
+    if args.diff:
+        config['diff_against'] = args.diff
 
     if args.headless:
         config['headless'] = True

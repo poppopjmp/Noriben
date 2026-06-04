@@ -30,6 +30,9 @@ htmlcov/
 *_Noriben_*.txt
 *.vt.json
 *.iocs.json
+*.stix.json
+*.misp.json
+*.suggested.yar
 *_NoribenReport.zip
 Noriben_*.log
 
