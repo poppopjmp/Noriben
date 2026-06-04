@@ -33,6 +33,8 @@ htmlcov/
 *.stix.json
 *.misp.json
 *.suggested.yar
+*.sigma.yml
+*.diff.html
 *_NoribenReport.zip
 Noriben_*.log
 

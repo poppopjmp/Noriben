@@ -87,12 +87,17 @@ Noriben can turn a run into artifacts you can act on:
 <pre>
 --gen-yara   Write a suggested YARA rule (*.suggested.yar) built from the
              behavioral indicators (dropped file names, mutexes, named pipes,
-             network hosts). A starting point to review, not a vetted rule.
+             network hosts, autostart value names). A starting point to
+             review, not a vetted rule.
+--gen-sigma  Write Sigma detection rules (*.sigma.yml) for dropped executables,
+             registry persistence, network endpoints, named pipes, and
+             suspicious command lines - each tagged with MITRE ATT&CK
 --stix       Export the IOCs as a STIX 2.1 bundle (*.stix.json)
 --misp       Export the IOCs as a MISP event (*.misp.json)
---diff FILE  Compare this run against a previously saved *.iocs.json baseline
-             and print what was added/removed (processes, files, hashes,
-             registry keys, hosts, pipes, mutexes, ATT&CK techniques)
+--diff FILE  Compare this run against a previously saved *.iocs.json baseline.
+             Prints what was added/removed (processes, files, hashes, registry
+             keys, hosts, pipes, mutexes, ATT&CK techniques) and also writes a
+             self-contained HTML diff report (*.diff.html)
 </pre>
 
 Example — triage a sample, then diff a second variant against it:
@@ -102,8 +107,9 @@ python Noriben.py --csv sample_a.csv --json --gen-yara --stix --misp
 python Noriben.py --csv sample_b.csv --diff sample_a.iocs.json
 </pre>
 
-`--gen-yara`, `--stix`, and `--misp` also have matching `gen_yara`,
-`stix_export`, and `misp_export` keys in `Noriben.config`.
+`--gen-yara`, `--gen-sigma`, `--stix`, and `--misp` also have matching
+`gen_yara`, `gen_sigma`, `stix_export`, and `misp_export` keys in
+`Noriben.config`.
 
 # AI-Assisted Report Analysis
 
