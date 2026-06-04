@@ -8,6 +8,16 @@
 # clean text report and timeline
 #
 # Changelog:
+# Version 3.0.0 - 04 Jun 2026 (poppopjmp fork)
+#       Major release - make a clear call on a sample at a glance:
+#           Deterministic verdict & risk-scoring engine (0-100 score, verdict of
+#           Malicious/Suspicious/Likely Benign with confidence and the reasons),
+#           shown as a banner at the top of every report and in the JSON
+#           Process tree reconstruction (parent -> child) in the report and JSON
+#           --html writes a single-file HTML dashboard (verdict, ATT&CK, IOCs,
+#           process tree, and activity tables) for easy reading and sharing
+#       Builds on the 2.x analytics (ATT&CK tagging, IOC/JSON, YARA/Sigma/STIX/
+#           MISP exports, run diff, multi-run consolidation)
 # Version 2.5.0 - 04 Jun 2026 (poppopjmp fork)
 #       Consolidated multi-run analysis:
 #           --merge aggregates several *.iocs.json reports (files, globs, or a
@@ -239,7 +249,7 @@ except ImportError:
     configparser = None
 
 # Below are global internal variables. Do not edit these. ################
-__VERSION__ = '2.5.0'
+__VERSION__ = '3.0.0'
 use_pmc = False
 use_virustotal = False
 vt_results = {}
@@ -347,6 +357,7 @@ def read_config(config_filename):
     optional_defaults = {
         'disable-file-hash': False,
         'json_report': False,
+        'html_report': False,
         'gen_yara': False,
         'gen_sigma': False,
         'stix_export': False,
@@ -1222,7 +1233,7 @@ def format_analysis_section(indicators, techniques):
     return lines
 
 
-def build_json_report(indicators, techniques, metadata):
+def build_json_report(indicators, techniques, metadata, verdict=None, process_tree=None):
     """
     Assemble a machine-readable report suitable for ingestion by other tooling.
 
@@ -1230,11 +1241,14 @@ def build_json_report(indicators, techniques, metadata):
         indicators: dict from analyze_indicators()
         techniques: list from detect_attack_techniques()
         metadata: dict of run metadata (version, timestamp, command line, etc.)
+        verdict: optional dict from score_sample()
+        process_tree: optional list from build_process_tree()
     Returns:
         dict ready to be serialized to JSON
     """
-    return {
+    report = {
         'noriben': metadata,
+        'verdict': verdict,
         'summary': {
             'processes': len(indicators['processes']),
             'files_created': len(indicators['files_created']),
@@ -1248,6 +1262,7 @@ def build_json_report(indicators, techniques, metadata):
         },
         'attack_techniques': techniques,
         'processes': indicators['processes'],
+        'process_tree': process_tree if process_tree is not None else [],
         'files': {
             'created': indicators['files_created'],
             'deleted': indicators['files_deleted'],
@@ -1267,6 +1282,168 @@ def build_json_report(indicators, techniques, metadata):
             'named_pipes': indicators.get('named_pipes', [])
         }
     }
+    return report
+
+
+# Risk-scoring weights. Each bucket contributes once if any of its techniques
+# fire. Ordered most-to-least severe; a technique is matched to the first
+# bucket whose prefixes it starts with.
+_SCORE_BUCKETS = [
+    (('T1490',), 30, 'Inhibits system recovery (ransomware-like)'),
+    (('T1486',), 30, 'Data encrypted for impact (ransomware-like)'),
+    (('T1547', 'T1543', 'T1546', 'T1053', 'T1574', 'T1037'), 20, 'Establishes persistence'),
+    (('T1562', 'T1070', 'T1564', 'T1027', 'T1497', 'T1055', 'T1140'), 15, 'Defense evasion / obfuscation'),
+    (('T1218',), 12, 'Proxied execution via signed binary (LOLBIN)'),
+    (('T1059',), 10, 'Script / command interpreter execution'),
+    (('T1071', 'T1105', 'T1571', 'T1095'), 10, 'Network / command-and-control activity'),
+    (('T1197',), 8, 'BITS jobs'),
+]
+
+_EXECUTABLE_EXTS = ('.exe', '.dll', '.scr', '.sys', '.com', '.cpl')
+
+
+def score_sample(indicators, techniques):
+    """
+    Produce an explainable, deterministic risk verdict for the sample from its
+    structured indicators and heuristic ATT&CK techniques. This complements the
+    optional AI analysis with an offline "clear call".
+
+    Arguments:
+        indicators: dict from analyze_indicators()
+        techniques: list from detect_attack_techniques()
+    Returns:
+        dict with 'score' (0-100), 'verdict', 'confidence', and 'reasons'
+    """
+    score = 0
+    reasons = []
+    technique_ids = [t['id'] for t in techniques]
+    technique_names = {t['id']: t['technique'] for t in techniques}
+
+    matched_buckets = set()
+    for tid in technique_ids:
+        for index, (prefixes, weight, label) in enumerate(_SCORE_BUCKETS):
+            if tid.startswith(prefixes):
+                if index not in matched_buckets:
+                    matched_buckets.add(index)
+                    score += weight
+                    reasons.append('{} ({})'.format(label, technique_names.get(tid, tid)))
+                break
+
+    exe_drops = [f for f in indicators.get('files_created', [])
+                 if f['path'].lower().endswith(_EXECUTABLE_EXTS)]
+    if exe_drops:
+        score += 12
+        reasons.append('Drops {} executable file(s)'.format(len(exe_drops)))
+
+    if indicators.get('dropped_file_hashes'):
+        score += 5
+        reasons.append('{} dropped file(s) hashed for tracking'.format(
+            len(indicators['dropped_file_hashes'])))
+
+    hosts = indicators.get('network_hosts', [])
+    if hosts:
+        score += min(5 + 3 * len(hosts), 15)
+        reasons.append('Contacts {} external network host(s)'.format(len(hosts)))
+
+    if indicators.get('mutexes'):
+        score += 4
+        reasons.append('Creates {} mutex(es) (infection marker)'.format(len(indicators['mutexes'])))
+
+    # Self-deletion / executable deletion is a classic anti-forensic signal
+    deleted_exes = [p for p in indicators.get('files_deleted', [])
+                    if p.lower().endswith(_EXECUTABLE_EXTS)]
+    if deleted_exes:
+        score += 10
+        reasons.append('Deletes executable file(s) (possible self-cleanup)')
+
+    score = min(score, 100)
+
+    if score >= 60:
+        verdict = 'Malicious'
+    elif score >= 25:
+        verdict = 'Suspicious'
+    else:
+        verdict = 'Likely Benign / Inconclusive'
+
+    if score >= 60 and len(reasons) >= 3:
+        confidence = 'High'
+    elif score >= 25:
+        confidence = 'Medium'
+    else:
+        confidence = 'Low'
+
+    if not reasons:
+        reasons.append('No notable malicious behaviors detected by heuristics.')
+
+    return {'score': score, 'verdict': verdict, 'confidence': confidence, 'reasons': reasons}
+
+
+def build_process_tree(processes):
+    """
+    Reconstruct a parent -> child process tree from CreateProcess records.
+
+    Arguments:
+        processes: list of process dicts from analyze_indicators()
+    Returns:
+        list of root node dicts: {'pid', 'label', 'children': [...]}
+    """
+    nodes = {}
+
+    def get_node(pid, label):
+        node = nodes.get(pid)
+        if node is None:
+            node = {'pid': pid, 'label': label or pid, 'children': []}
+            nodes[pid] = node
+        elif label and node['label'] == pid:
+            node['label'] = label
+        return node
+
+    child_pids = set()
+    for proc in processes:
+        parent = get_node(proc['pid'], proc.get('process'))
+        child_pid = proc.get('child_pid')
+        if child_pid:
+            child = get_node(child_pid, proc.get('command_line'))
+            if child['pid'] not in [c['pid'] for c in parent['children']]:
+                parent['children'].append(child)
+            child_pids.add(child_pid)
+
+    roots = [node for pid, node in nodes.items() if pid not in child_pids]
+    # Degenerate case (e.g. a pure cycle): fall back to every node as a root so
+    # nothing is silently dropped; format_process_tree() guards against cycles.
+    if not roots and nodes:
+        roots = list(nodes.values())
+    roots.sort(key=lambda n: (len(n['pid']), n['pid']))
+    return roots
+
+
+def format_process_tree(roots):
+    """Render a process tree (from build_process_tree) as indented text lines."""
+    lines = []
+    visited = set()
+
+    def walk(node, depth):
+        if node['pid'] in visited:
+            lines.append('{}[{}] (cycle)'.format('    ' * depth, node['pid']))
+            return
+        visited.add(node['pid'])
+        lines.append('{}[{}] {}'.format('    ' * depth, node['pid'], node['label'][:140]))
+        for child in node['children']:
+            walk(child, depth + 1)
+
+    for root in roots:
+        walk(root, 0)
+    return lines
+
+
+def format_verdict_section(verdict):
+    """Render the deterministic verdict as a prominent report header block."""
+    return [
+        '==================================================',
+        ' VERDICT: {}   (risk score {}/100, {} confidence)'.format(
+            verdict['verdict'], verdict['score'], verdict['confidence']),
+        '==================================================',
+        'Why:'] + ['  - {}'.format(reason) for reason in verdict['reasons']] + ['']
 
 
 def build_yara_rule(indicators, rule_name='Noriben_Suspected_Sample', hash_type='SHA256'):
@@ -1867,6 +2044,133 @@ def run_consolidation(paths, config):
     print('\n' + '\n'.join(text_lines))
 
 
+def build_run_html(report_data, metadata):
+    """
+    Render a complete single-run analysis as a self-contained HTML dashboard:
+    verdict, ATT&CK techniques, IOCs, process tree, and activity tables.
+
+    Arguments:
+        report_data: dict from build_json_report() (includes verdict/process_tree)
+        metadata: dict of run metadata
+    Returns:
+        HTML string
+    """
+    def esc(text):
+        return (str(text).replace('&', '&amp;').replace('<', '&lt;')
+                .replace('>', '&gt;').replace('"', '&quot;'))
+
+    verdict = report_data.get('verdict') or {'verdict': 'Unknown', 'score': 0,
+                                             'confidence': 'Low', 'reasons': []}
+    badge_colors = {'Malicious': '#b00020', 'Suspicious': '#c77700'}
+    badge_color = badge_colors.get(verdict['verdict'], '#0a7d00')
+
+    parts = ['<h1>Noriben analysis report</h1>',
+             '<p class="meta">Noriben v{} &middot; {} &middot; {}</p>'.format(
+                 esc(metadata.get('version', '')), esc(metadata.get('generated', '')),
+                 esc(metadata.get('command_line') or metadata.get('source_csv', '')))]
+
+    # Verdict banner
+    parts.append('<div class="verdict" style="background:{}">{} '
+                 '<span class="score">{}/100 &middot; {} confidence</span></div>'.format(
+                     badge_color, esc(verdict['verdict']), verdict['score'], esc(verdict['confidence'])))
+    parts.append('<ul class="reasons">')
+    for reason in verdict['reasons']:
+        parts.append('<li>{}</li>'.format(esc(reason)))
+    parts.append('</ul>')
+
+    # Summary counts
+    summary = report_data.get('summary', {})
+    parts.append('<h2>Summary</h2><p class="counts">' + ' &middot; '.join(
+        '{}: <b>{}</b>'.format(esc(k.replace('_', ' ')), v) for k, v in summary.items()) + '</p>')
+
+    # ATT&CK
+    techniques = report_data.get('attack_techniques', [])
+    if techniques:
+        parts.append('<h2>MITRE ATT&amp;CK techniques</h2><table>'
+                     '<tr><th>ID</th><th>Technique</th><th>Evidence</th></tr>')
+        for tech in techniques:
+            parts.append('<tr><td>{}</td><td>{}</td><td>{}</td></tr>'.format(
+                esc(tech['id']), esc(tech['technique']),
+                esc('; '.join(tech.get('evidence', []))[:200])))
+        parts.append('</table>')
+
+    # IOCs
+    hashes = report_data.get('iocs', {}).get('file_hashes', [])
+    if hashes:
+        parts.append('<h2>Dropped file hashes</h2><table><tr><th>Hash</th><th>Path</th></tr>')
+        for item in hashes:
+            parts.append('<tr><td>{}</td><td>{}</td></tr>'.format(esc(item['hash']), esc(item['path'])))
+        parts.append('</table>')
+
+    def simple_list(title, values):
+        if values:
+            parts.append('<h2>{}</h2><ul>'.format(esc(title)))
+            for value in values:
+                parts.append('<li>{}</li>'.format(esc(value)))
+            parts.append('</ul>')
+
+    simple_list('Network hosts', report_data.get('network', {}).get('hosts', []))
+    simple_list('Mutexes', report_data.get('mutexes', []))
+    simple_list('Named pipes', report_data.get('named_pipes', []))
+
+    # Process tree
+    tree = report_data.get('process_tree', [])
+    if tree:
+        parts.append('<h2>Process tree</h2>')
+
+        def render_tree(nodes, seen):
+            html = ['<ul class="tree">']
+            for node in nodes:
+                label = '<b>[{}]</b> {}'.format(esc(node['pid']), esc(node['label'][:160]))
+                if node['pid'] in seen:
+                    html.append('<li>{} (cycle)</li>'.format(label))
+                    continue
+                seen.add(node['pid'])
+                html.append('<li>{}'.format(label))
+                if node.get('children'):
+                    html.append(render_tree(node['children'], seen))
+                html.append('</li>')
+            html.append('</ul>')
+            return '\n'.join(html)
+
+        parts.append(render_tree(tree, set()))
+
+    # Activity tables (capped for size)
+    def activity_table(title, rows):
+        if not rows:
+            return
+        parts.append('<h2>{} <span class="meta">({})</span></h2><ul class="mono">'.format(
+            esc(title), len(rows)))
+        for row in rows[:300]:
+            parts.append('<li>{}</li>'.format(esc(row)))
+        if len(rows) > 300:
+            parts.append('<li class="meta">... {} more</li>'.format(len(rows) - 300))
+        parts.append('</ul>')
+
+    files = report_data.get('files', {})
+    activity_table('Files created', ['{}  {}'.format(f.get('hash') or '', f['path']).strip()
+                                     for f in files.get('created', [])])
+    activity_table('Files deleted', files.get('deleted', []))
+    activity_table('Registry writes', ['{}  {}'.format(r['operation'], r['key'])
+                                       for r in report_data.get('registry', [])])
+    activity_table('Network connections', report_data.get('network', {}).get('connections', []))
+
+    return (
+        '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">\n'
+        '<title>Noriben report - {title}</title>\n'
+        '<style>body{{font-family:Segoe UI,Arial,sans-serif;margin:2em;color:#222;max-width:1100px}}'
+        'h1{{font-size:1.5em}}h2{{font-size:1.1em;border-bottom:1px solid #ccc;margin-top:1.5em}}'
+        '.verdict{{color:#fff;font-size:1.3em;font-weight:bold;padding:.5em .8em;border-radius:6px}}'
+        '.verdict .score{{font-size:.7em;font-weight:normal;opacity:.9}}'
+        '.reasons{{margin:.5em 0}}.counts{{font-size:.95em}}'
+        'table{{border-collapse:collapse;margin:.3em 0}}td,th{{border:1px solid #ddd;padding:2px 8px;'
+        'font-family:Consolas,monospace;font-size:.85em;text-align:left;vertical-align:top}}'
+        'ul.mono li,ul.tree li{{font-family:Consolas,monospace;font-size:.85em}}'
+        'ul.tree{{list-style:none}}.meta{{color:#666;font-size:.85em}}</style>'
+        '</head><body>\n{body}\n</body></html>\n'
+    ).format(title=esc(metadata.get('source_csv', 'Noriben')), body='\n'.join(parts))
+
+
 def parse_csv(csv_file, report, timeline):
     """
     Given the location of CSV and TXT files, parse the CSV for notable items
@@ -2113,6 +2417,8 @@ def parse_csv(csv_file, report, timeline):
     indicators = analyze_indicators(process_output, file_output, reg_output,
                                     net_output, remote_servers, config['hash_type'])
     attack_techniques = detect_attack_techniques(indicators)
+    verdict = score_sample(indicators, attack_techniques)
+    process_tree = build_process_tree(indicators['processes'])
     report_metadata = {
         'version': __VERSION__,
         'generated': datetime.datetime.now().isoformat(timespec='seconds'),
@@ -2120,7 +2426,8 @@ def parse_csv(csv_file, report, timeline):
         'hash_type': config['hash_type'],
         'source_csv': os.path.basename(csv_file)
     }
-    json_report_data = build_json_report(indicators, attack_techniques, report_metadata)
+    json_report_data = build_json_report(indicators, attack_techniques, report_metadata,
+                                         verdict=verdict, process_tree=process_tree)
 
     report.append('-=] Sandbox Analysis Report generated by Noriben v{}'.format(__VERSION__))
     report.append('-=] https://github.com/Rurik/Noriben')
@@ -2137,8 +2444,18 @@ def parse_csv(csv_file, report, timeline):
     report.append('-=] Analysis time: {:.2f} seconds'.format(time_analyze))
     report.append('')
 
+    for verdict_line in format_verdict_section(verdict):
+        report.append(verdict_line)
+
     for summary_line in format_analysis_section(indicators, attack_techniques):
         report.append(summary_line)
+
+    if process_tree:
+        report.append('Process Tree:')
+        report.append('==================')
+        for tree_line in format_process_tree(process_tree):
+            report.append(tree_line)
+        report.append('')
 
     # Optional run-to-run diff against a previously saved JSON IOC report
     diff_result = None
@@ -2229,6 +2546,8 @@ def parse_csv(csv_file, report, timeline):
     _write_export(diff_result is not None, '.diff.html', 'HTML diff report',
                   lambda: build_diff_html(diff_result, os.path.basename(baseline_path), report_metadata),
                   as_json=False)
+    _write_export(config.get('html_report'), '.report.html', 'HTML report',
+                  lambda: build_run_html(json_report_data, report_metadata), as_json=False)
 
     if config['debug'] and vt_dump:
         vt_file = os.path.join(config['output_folder'], os.path.splitext(csv_file)[0] + '.vt.json')
@@ -2415,6 +2734,9 @@ def main():
     parser.add_argument('--disable-file-hash', action='store_true', help='Disable hashing new files', required=False)
     parser.add_argument('--json', action='store_true',
                         help='Also write a structured JSON report with IOCs and ATT&CK tags', required=False)
+    parser.add_argument('--html', action='store_true',
+                        help='Also write a single-file HTML dashboard (verdict, ATT&CK, IOCs, process tree)',
+                        required=False)
     parser.add_argument('--gen-yara', action='store_true',
                         help='Generate a suggested YARA rule from behavioral indicators', required=False)
     parser.add_argument('--gen-sigma', action='store_true',
@@ -2492,6 +2814,8 @@ def main():
 
     if args.json:
         config['json_report'] = True
+    if args.html:
+        config['html_report'] = True
     if args.gen_yara:
         config['gen_yara'] = True
     if args.gen_sigma:

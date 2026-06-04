@@ -5,6 +5,27 @@ This fork tracks upstream [Rurik/Noriben](https://github.com/Rurik/Noriben)
 and adds analyst-focused features on top. Versions follow loose semantic
 versioning.
 
+## [3.0.0] - 2026-06-04
+
+Major release — make a clear call on a sample at a glance.
+
+### Added
+- **Deterministic verdict & risk-scoring engine** — an explainable
+  Malicious / Suspicious / Likely-Benign call with a 0–100 score, a confidence
+  level, and the list of contributing reasons. Computed offline from the
+  observed behavior and ATT&CK techniques (no AI required). Shown as a banner
+  at the top of every report and included in the JSON report.
+- **Process tree** reconstruction (parent → child) in the text report and JSON.
+- **`--html`** — a single-file HTML dashboard with the verdict, ATT&CK
+  techniques, IOCs, process tree, and activity tables for easy reading and
+  sharing.
+- `tests/test_verdict.py` (12 cases). Suite total: 86 tests.
+
+### Notes
+- Fully backward compatible: all 2.x outputs and flags are unchanged; the new
+  verdict/tree are additive and `build_json_report()` keeps working for callers
+  that don't pass them.
+
 ## [2.5.0] - 2026-06-04
 
 Consolidated multi-run analysis.
