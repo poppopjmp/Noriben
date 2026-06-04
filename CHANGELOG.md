@@ -5,6 +5,17 @@ This fork tracks upstream [Rurik/Noriben](https://github.com/Rurik/Noriben)
 and adds analyst-focused features on top. Versions follow loose semantic
 versioning.
 
+## [2.5.0] - 2026-06-04
+
+Consolidated multi-run analysis.
+
+### Added
+- **`--merge`** — aggregate several `*.iocs.json` reports (files, globs, or a
+  folder) into one summary that highlights which IOCs and ATT&CK techniques are
+  **shared across runs** vs. unique to a sample (useful for profiling a malware
+  family). Writes `Noriben_consolidated.{txt,json,html}`.
+- `tests/test_consolidate.py` (8 cases). Suite total: 74 tests.
+
 ## [2.4.0] - 2026-06-04
 
 Detection-engineering exports.

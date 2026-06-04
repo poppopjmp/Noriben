@@ -111,6 +111,21 @@ python Noriben.py --csv sample_b.csv --diff sample_a.iocs.json
 `gen_yara`, `gen_sigma`, `stix_export`, and `misp_export` keys in
 `Noriben.config`.
 
+### Consolidating multiple runs
+
+To profile a malware family, run several samples with `--json`, then merge the
+resulting `*.iocs.json` reports into a single view that shows which IOCs and
+ATT&CK techniques are **shared across runs** versus unique to one sample:
+
+<pre>
+python Noriben.py --merge results/            # a folder of *.iocs.json
+python Noriben.py --merge a.iocs.json b.iocs.json c.iocs.json
+python Noriben.py --merge "results/*.iocs.json" --output results
+</pre>
+
+This writes `Noriben_consolidated.txt`, `.json`, and `.html` (a sortable-looking
+table with shared indicators highlighted).
+
 # AI-Assisted Report Analysis
 
 Noriben can hand the generated report to a Large Language Model to produce an

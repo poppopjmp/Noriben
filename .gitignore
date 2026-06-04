@@ -28,6 +28,7 @@ htmlcov/
 *.PML
 *_Noriben_*.csv
 *_Noriben_*.txt
+Noriben_consolidated.*
 *.vt.json
 *.iocs.json
 *.stix.json

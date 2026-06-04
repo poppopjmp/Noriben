@@ -8,6 +8,12 @@
 # clean text report and timeline
 #
 # Changelog:
+# Version 2.5.0 - 04 Jun 2026 (poppopjmp fork)
+#       Consolidated multi-run analysis:
+#           --merge aggregates several *.iocs.json reports (files, globs, or a
+#           folder) into one summary, showing which IOCs and ATT&CK techniques
+#           are shared across runs vs unique to a sample - useful for profiling
+#           a malware family. Writes Noriben_consolidated.{txt,json,html}
 # Version 2.4.0 - 04 Jun 2026 (poppopjmp fork)
 #       Detection-engineering exports:
 #           --gen-sigma writes Sigma detection rules (*.sigma.yml) for dropped
@@ -194,6 +200,7 @@ import argparse
 import codecs
 import csv
 import datetime
+import glob
 import hashlib
 import ipaddress
 import json
@@ -232,7 +239,7 @@ except ImportError:
     configparser = None
 
 # Below are global internal variables. Do not edit these. ################
-__VERSION__ = '2.4.0'
+__VERSION__ = '2.5.0'
 use_pmc = False
 use_virustotal = False
 vt_results = {}
@@ -1688,6 +1695,178 @@ def build_diff_html(diff, baseline_name, metadata):
              generated=esc(metadata.get('generated', '')), body='\n'.join(body))
 
 
+# Categories aggregated when consolidating multiple runs, mapped to an
+# extractor that pulls the comparable values out of a JSON IOC report.
+_CONSOLIDATE_CATEGORIES = [
+    ('attack_techniques', 'ATT&CK techniques',
+     lambda r: ['{} {}'.format(t.get('id', ''), t.get('technique', '')).strip()
+                for t in r.get('attack_techniques', [])]),
+    ('processes', 'Process command lines',
+     lambda r: [p['command_line'] for p in r.get('processes', []) if p.get('command_line')]),
+    ('files_created', 'Files created',
+     lambda r: [f['path'] for f in r.get('files', {}).get('created', [])]),
+    ('file_hashes', 'File hashes',
+     lambda r: [h['hash'] for h in r.get('iocs', {}).get('file_hashes', [])]),
+    ('registry', 'Registry keys',
+     lambda r: [x['key'] for x in r.get('registry', [])]),
+    ('network_hosts', 'Network hosts',
+     lambda r: r.get('network', {}).get('hosts', [])),
+    ('mutexes', 'Mutexes', lambda r: r.get('mutexes', [])),
+    ('named_pipes', 'Named pipes', lambda r: r.get('named_pipes', []))
+]
+
+
+def consolidate_reports(named_reports):
+    """
+    Aggregate IOCs across multiple runs to spot what is shared (e.g. a malware
+    family fingerprint) versus what is unique to one sample.
+
+    Arguments:
+        named_reports: list of (name, report_dict) tuples, where report_dict is
+            a JSON IOC report produced by build_json_report()
+    Returns:
+        dict with run names and, per category, a list of
+        {'value', 'count', 'runs'} entries sorted by frequency
+    """
+    run_names = [name for name, _report in named_reports]
+    categories = {}
+    for key, _label, extractor in _CONSOLIDATE_CATEGORIES:
+        counter = {}
+        for name, report in named_reports:
+            for value in set(extractor(report)):
+                counter.setdefault(value, set()).add(name)
+        items = [{'value': value, 'count': len(runs), 'runs': sorted(runs)}
+                 for value, runs in counter.items()]
+        items.sort(key=lambda entry: (-entry['count'], entry['value']))
+        categories[key] = items
+    return {'runs': run_names, 'run_count': len(run_names), 'categories': categories}
+
+
+def format_consolidated_section(consolidated):
+    """
+    Render a consolidated multi-run summary as report lines, highlighting IOCs
+    shared across every run.
+
+    Arguments:
+        consolidated: dict from consolidate_reports()
+    Returns:
+        list of report line strings
+    """
+    run_count = consolidated['run_count']
+    lines = ['Consolidated Multi-Run Report ({} runs):'.format(run_count),
+             '==================']
+    for name in consolidated['runs']:
+        lines.append('  - {}'.format(name))
+    lines.append('')
+
+    for key, label, _extractor in _CONSOLIDATE_CATEGORIES:
+        items = consolidated['categories'].get(key, [])
+        if not items:
+            continue
+        lines.append('{} ({} unique):'.format(label, len(items)))
+        for entry in items:
+            marker = ' [SHARED]' if entry['count'] == run_count and run_count > 1 else ''
+            lines.append('  ({}/{}){} {}'.format(entry['count'], run_count, marker, entry['value'][:150]))
+        lines.append('')
+    return lines
+
+
+def build_consolidated_html(consolidated, metadata):
+    """Render the consolidated multi-run report as a self-contained HTML page."""
+    def esc(text):
+        return (str(text).replace('&', '&amp;').replace('<', '&lt;')
+                .replace('>', '&gt;').replace('"', '&quot;'))
+
+    run_count = consolidated['run_count']
+    body = ['<h1>Noriben consolidated multi-run report</h1>',
+            '<p class="meta">{} runs &middot; Noriben v{} &middot; {}</p>'.format(
+                run_count, esc(metadata.get('version', '')), esc(metadata.get('generated', ''))),
+            '<p class="meta">Runs: {}</p>'.format(esc(', '.join(consolidated['runs'])))]
+    for key, label, _extractor in _CONSOLIDATE_CATEGORIES:
+        items = consolidated['categories'].get(key, [])
+        if not items:
+            continue
+        body.append('<h2>{} <span class="meta">({} unique)</span></h2>'.format(esc(label), len(items)))
+        body.append('<table><tr><th>Seen</th><th>Indicator</th></tr>')
+        for entry in items:
+            shared = ' class="shared"' if entry['count'] == run_count and run_count > 1 else ''
+            body.append('<tr{}><td>{}/{}</td><td>{}</td></tr>'.format(
+                shared, entry['count'], run_count, esc(entry['value'])))
+        body.append('</table>')
+
+    return (
+        '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">\n'
+        '<title>Noriben consolidated report</title>\n'
+        '<style>body{font-family:Segoe UI,Arial,sans-serif;margin:2em;color:#222}'
+        'h1{font-size:1.4em}h2{font-size:1.1em;border-bottom:1px solid #ccc}'
+        'table{border-collapse:collapse;margin-bottom:1em}td,th{border:1px solid #ddd;'
+        'padding:2px 8px;font-family:Consolas,monospace;font-size:.9em;text-align:left}'
+        'tr.shared{background:#fff3cd}.meta{color:#666;font-size:.9em}</style>'
+        '</head><body>\n' + '\n'.join(body) + '\n</body></html>\n')
+
+
+def run_consolidation(paths, config):
+    """
+    Expand the given paths (files, globs, or directories), load the JSON IOC
+    reports they reference, consolidate them, and write text/JSON/HTML
+    summaries. Used by the --merge mode.
+
+    Arguments:
+        paths: list of file paths, globs, or directories
+        config: active configuration dictionary
+    Returns:
+        none
+    """
+    json_files = []
+    for path in paths:
+        if os.path.isdir(path):
+            json_files.extend(sorted(glob.glob(os.path.join(path, '*.iocs.json'))))
+        elif any(ch in path for ch in '*?['):
+            json_files.extend(sorted(glob.glob(path)))
+        else:
+            json_files.append(path)
+    seen = set()
+    json_files = [f for f in json_files if not (f in seen or seen.add(f))]
+
+    named_reports = []
+    for json_file in json_files:
+        try:
+            with open(json_file, encoding='utf-8') as handle:
+                report = json.load(handle)
+        except (OSError, ValueError) as err:
+            print('[!] Skipping {}: {}'.format(json_file, err))
+            continue
+        name = report.get('noriben', {}).get('source_csv') or os.path.basename(json_file)
+        named_reports.append((name, report))
+
+    if not named_reports:
+        print('[!] No valid *.iocs.json reports found to consolidate.')
+        return
+
+    print('[*] Consolidating {} run(s)...'.format(len(named_reports)))
+    consolidated = consolidate_reports(named_reports)
+    metadata = {'version': __VERSION__,
+                'generated': datetime.datetime.now().isoformat(timespec='seconds')}
+
+    out_dir = config.get('output_folder') or '.'
+    base = os.path.join(out_dir, 'Noriben_consolidated')
+    text_lines = format_consolidated_section(consolidated)
+    try:
+        with open(base + '.txt', 'w', encoding='utf-8') as handle:
+            handle.write('\r\n'.join(text_lines))
+        print('[*] Saving consolidated report to: {}.txt'.format(base))
+        with open(base + '.json', 'w', encoding='utf-8') as handle:
+            json.dump(dict({'noriben': metadata}, **consolidated), handle, indent=2)
+        print('[*] Saving consolidated JSON to: {}.json'.format(base))
+        with open(base + '.html', 'w', encoding='utf-8') as handle:
+            handle.write(build_consolidated_html(consolidated, metadata))
+        print('[*] Saving consolidated HTML to: {}.html'.format(base))
+    except OSError as err:
+        print('[!] Error writing consolidated output: {}'.format(err))
+
+    print('\n' + '\n'.join(text_lines))
+
+
 def parse_csv(csv_file, report, timeline):
     """
     Given the location of CSV and TXT files, parse the CSV for notable items
@@ -2246,6 +2425,9 @@ def main():
                         help='Export IOCs as a MISP event (*.misp.json)', required=False)
     parser.add_argument('--diff', help='Diff this run against a previously saved *.iocs.json baseline',
                         required=False)
+    parser.add_argument('--merge', nargs='+', metavar='IOCS_JSON',
+                        help='Consolidate multiple *.iocs.json reports (files, globs, or a folder) '
+                        'into a single multi-run summary, then exit', required=False)
     parser.add_argument('--headless', action='store_true', help='Do not open results on VM after processing',
                         required=False)
     parser.add_argument('--human', action='store_true', help='Perform human activity', required=False)
@@ -2320,6 +2502,13 @@ def main():
         config['misp_export'] = True
     if args.diff:
         config['diff_against'] = args.diff
+
+    # Consolidated multi-run mode: aggregate several JSON IOC reports and exit.
+    if args.merge:
+        if args.output:
+            config['output_folder'] = args.output
+        run_consolidation(args.merge, config)
+        terminate_self(0)
 
     if args.headless:
         config['headless'] = True
