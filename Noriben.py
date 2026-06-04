@@ -8,7 +8,7 @@
 # clean text report and timeline
 #
 # Changelog:
-# Version 2.1.0 - June 2025
+# Version 2.1.0 - 04 Jun 2026 (poppopjmp fork)
 #       New feature: AI-assisted report analysis
 #           Added --ai to send the generated report to an OpenAI-compatible
 #           Chat Completions endpoint (local Ollama, OpenAI, LM Studio, vLLM,
@@ -18,15 +18,35 @@
 #           and saved as a standalone *_AI_Analysis.md file
 #           All AI failures are non-fatal; the standard report is unaffected
 #       Added --version flag
-# Version 2.0.1 - June 2025
 #       Maintenance/support refresh:
 #           Fixed crash in NoribenRead.py from leftover Python 2 unicode() call;
 #           now decodes archive bytes correctly on Python 3
 #           Fixed bug where a missing 'requests' module clobbered the stdlib
 #           json module, breaking VirusTotal debug dumps
 #           Cleaned up dead/unused variables flagged by pyflakes
-#           Added requirements.txt, pyproject.toml, .gitignore, and GitHub
-#           Actions CI (byte-compile + pyflakes across Python 3.8-3.12)
+#           Added requirements.txt, pyproject.toml, .gitignore, unit tests, and
+#           GitHub Actions CI (byte-compile + pyflakes + tests on Py 3.8-3.12)
+#       Aligned with upstream through v2.0.4 (logging library, full --cmd line,
+#           non-Windows CSV reprocessing, --disable-file-hash, regular-file
+#           checks, chunked hashing, IPv6-safe host parsing, Win11 filters)
+#       Hardened during integration:
+#           Added missing 'import stat' used by file_exists()
+#           --disable-file-hash now sets the same config key parse_csv reads
+#           --pml resolves procmon before use (fixes reference-before-set) while
+#           keeping --csv procmon-free so non-Windows CSV reprocessing works
+# Version 2.0.4 - 26 Mar 2026 (upstream)
+#       Fixed bug of procmon variable referenced before set
+#       Fixed server hostname parsing
+# Version 2.0.3 - 25 Mar 2026
+#       Change file checking to only approve regular files
+#       Changed file hashing to now read in chunks instead of all at once
+# Version 2.0.2 - 23 Mar 2026
+#       Allow execution on Non-Windows solely for processing premade CSV files
+#       Added disable-file-hash to avoid hashing created files
+# Version 2.0.1 - November 2023
+#       Logging is now based upon standard logging library
+#       Now supports --cmd as a full command line to allow arguments. e.g.:
+#       --cmd "c:\tools\malware.exe -r C:\"
 # Version 2.0.0 - August 2023
 #       Major changes to NoribenSandbox host script
 #           Updated many of the functions, such as properly deleting files in guest
@@ -144,9 +164,13 @@ import codecs
 import csv
 import datetime
 import hashlib
+import ipaddress
 import json
+import logging
 import os
 import re
+import shlex
+import stat
 import subprocess
 import string
 import sys
@@ -281,7 +305,8 @@ def read_config(config_filename):
         sys.exit(12)
 
     # Apply defaults for optional/newer settings so older config files keep working
-    ai_defaults = {
+    optional_defaults = {
+        'disable-file-hash': False,
         'ai_enabled': False,
         'ai_provider': 'ollama',
         'ai_base_url': '',
@@ -290,8 +315,8 @@ def read_config(config_filename):
         'ai_timeout': '120',
         'ai_max_chars': '60000'
     }
-    for ai_key, ai_value in ai_defaults.items():
-        config.setdefault(ai_key, ai_value)
+    for opt_key, opt_value in optional_defaults.items():
+        config.setdefault(opt_key, opt_value)
 
     return config
 
@@ -326,6 +351,32 @@ def human():
         pyautogui.moveTo(x_pos-250, y_pos+500, duration = 0.1)
 
 
+def network_split_host_port(server):
+    """
+    Split servers to unique host and port values.
+    A standard split breaks IPv6
+
+    Arguments:
+        server: String of server with optional port
+    Returns:
+        string of host, string of port
+    """
+    server = server.strip()
+
+    if server.startswith("["):  # [IPv6]:port
+        host, _, rest = server[1:].partition("]")
+        return host, (rest[1:] if rest.startswith(":") and rest[1:].isdigit() else None)
+
+    try:  # plain IPv4 or IPv6
+        ipaddress.ip_address(server)
+        return server, None
+    except ValueError:
+        pass
+
+    host, sep, port = server.rpartition(":")
+    return (host, port) if sep and port.isdigit() else (server, None)
+
+
 def terminate_self(error):
     """
     Implemented for better troubleshooting.
@@ -347,6 +398,11 @@ def log_debug(msg, override=False):
     """
     Logs a passed message. Results are printed and stored in
     a list for later writing to the debug log.
+    Debug filename may not be set until later in execution. To avoid
+    out-of-order messages, if debug_file is not set, then messages
+    will be appended to a debug_messages buffer. Once debug_file is set
+    these are written to the log, then cleared and that buffer is never
+    used again.
 
     Arguments:
         msg: Text string of message
@@ -358,15 +414,19 @@ def log_debug(msg, override=False):
 
     if msg and (config['debug'] or override):
         if debug_file:
-            if debug_messages:  # If buffer, write and erase buffer
-                with open(debug_file, 'a', encoding='utf-8') as debug_file_handle:
-                    for item in debug_messages:
-                        debug_file_handle.write(item)
+            if debug_messages:
+                # If file is now set, and there's a buffer, treat this is
+                # first time log entries are written.
+                logging.basicConfig(filename=debug_file, encoding='utf-8', level=logging.DEBUG)
+
+                for item in debug_messages:
+                    logging.debug(item)
+
                 debug_messages = []
-            else:
-                open(debug_file, 'a', encoding='utf-8').write(f'{msg}\n')
-        else:
-            debug_messages.append(msg + '\r\n')
+
+            logging.debug(msg)
+        else: # No debug file set, so add to temp buffer for now
+            debug_messages.append(msg)
 
 
 def generalize_vars_init():
@@ -418,6 +478,10 @@ def generalize_var(path_string):
     Returns:
         string value of a generalized string
     """
+    # For running script in Non-Windows, it cannot eval env vars. Skip
+    if sys.platform in ('linux' ,'darwin'):
+        return path_string
+
     if path_general_list:
         generalize_vars_init()  # For edge cases when this isn't previously called.
 
@@ -665,15 +729,20 @@ def open_file_with_assoc(fname):
 
 def file_exists(fname):
     """
-    Determine if a file exists
+    Determine if a file exists and is a regular file
 
     Arguments:
         fname: path to a file
     Returns:
         boolean value if file exists
     """
+
     log_debug('[*] Checking for existence of file: {}'.format(fname))
-    return os.path.exists(fname) and os.access(fname, os.F_OK) and not os.path.isdir(fname)
+    try:
+        st = os.stat(fname)
+        return stat.S_ISREG(st.st_mode)  # Only true for regular files
+    except (FileNotFoundError, PermissionError):
+        return False
 
 
 def check_procmon():
@@ -685,12 +754,15 @@ def check_procmon():
     """
     log_debug('[*] Checking for procmon in the following location: {}'.format(config['procmon']))
     procmon_exe = config['procmon']
+
     if file_exists(procmon_exe):
         return procmon_exe
 
     for path in os.environ['PATH'].split(os.pathsep):
-        if file_exists(os.path.join(path.strip('"'), procmon_exe)):
-            return os.path.join(path, procmon_exe)
+        procmon_path = os.path.join(path.strip('"'), procmon_exe)
+
+        if file_exists(procmon_path):
+            return procmon_path
 
     if file_exists(os.path.join(script_cwd, procmon_exe)):
         return os.path.join(script_cwd, procmon_exe)
@@ -708,13 +780,30 @@ def hash_file(fname):
         hex hash value of file's contents as a string
     """
     log_debug('[*] Performing {} hash on file: {}'.format(config['hash_type'], fname))
+    # Skip non-regular files
+    if not file_exists(fname):
+        log_debug('[!] Skipping non-regular file: {}'.format(fname))
+        return None
+
+    # choose hash type
     if config['hash_type'] == 'MD5':
-        return hashlib.md5(codecs.open(fname, 'rb').read()).hexdigest()
-    if config['hash_type'] == 'SHA1':
-        return hashlib.sha1(codecs.open(fname, 'rb').read()).hexdigest()
-    if config['hash_type'] == 'SHA256':
-        return hashlib.sha256(codecs.open(fname, 'rb').read()).hexdigest()
-    return ''
+        hasher = hashlib.md5()
+    elif config['hash_type'] == 'SHA1':
+        hasher = hashlib.sha1()
+    elif config['hash_type'] == 'SHA256':
+        hasher = hashlib.sha256()
+    else:
+        return ''
+
+    # Read file in chunks
+    try:
+        with open(fname, 'rb') as f:
+            while chunk := f.read(8192):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except Exception as e:
+        log_debug(f"[!] Could not hash file {fname}: {e}")
+        return None
 
 
 def get_session_name():
@@ -755,14 +844,14 @@ def approvelist_scan(approvelist, data):
         boolean value of if item exists in approvelist
     """
     for event in data.values():
-        for bad in approvelist + global_approvelist:
-            bad = os.path.expandvars(bad).replace('\\', '\\\\')
+        for good_item in approvelist + global_approvelist:
+            good_item = os.path.expandvars(good_item).replace('\\', '\\\\')
             try:
-                search_result = re.search(bad, event, flags=re.IGNORECASE)
+                search_result = re.search(good_item, event, flags=re.IGNORECASE)
                 if search_result:
                     return True
             except re.error:
-                log_debug('[!] Error found while processing filters.\r\nFilter:\t{}\r\nEvent:\t{}'.format(bad, event))
+                log_debug('[!] Error found while processing filters.\r\nFilter:\t{}\r\nEvent:\t{}'.format(good_item, event))
                 log_debug(traceback.format_exc())
                 return False
     return False
@@ -909,25 +998,32 @@ def parse_csv(csv_file, report, timeline):
                         file_output.append(outputtext)
                         timeline.append(tl_text)
                     else:
+                        av_hits = ''
                         try:
-                            hashval = hash_file(path)
-                            if hashval in hash_approvelist:
-                                log_debug('[_] Skipping hash: {}'.format(hashval))
-                                continue
+                            if config['disable-file-hash']:
+                                hashval = ''
+                            else:
+                                hashval = hash_file(path)
+                                if hashval in hash_approvelist:
+                                    log_debug('[_] Skipping hash: {}'.format(hashval))
+                                    continue
 
-                            av_hits = ''
-                            if use_virustotal and has_internet:
-                                av_hits = virustotal_query_hash(hashval, path)
+                                if use_virustotal and has_internet:
+                                    av_hits = virustotal_query_hash(hashval, path)
 
                             if config['generalize_paths']:
                                 path = generalize_var(path)
-                            outputtext = '[CreateFile] {}:{} > {}\t[{}: {}]{}{}'.format(field['Process Name'], field['PID'], path,
-                                                                                        config['hash_type'], hashval,
-                                                                                        yara_hits, av_hits)
-                            tl_text = '{},File,CreateFile,{},{},{},{},{},{},{}'.format(date_stamp,
+
+                            if hashval:
+                                hashval_output = '[{}: {}]'.format(config['hash_type'], hashval)
+                            else:
+                                hashval_output = ''
+
+                            outputtext = '[CreateFile] {}:{} > {}\t{}{}{}'.format(field['Process Name'], field['PID'], path,
+                                                                                        hashval_output, yara_hits, av_hits)
+                            tl_text = '{},File,CreateFile,{},{},{},{},{},{}'.format(date_stamp,
                                                                                        field['Process Name'], field['PID'], path,
-                                                                                       config['hash_type'], hashval,
-                                                                                       yara_hits, av_hits)
+                                                                                       hashval_output, yara_hits, av_hits)
                             file_output.append(outputtext)
                             timeline.append(tl_text)
                         except (IndexError, IOError):
@@ -1070,9 +1166,10 @@ def parse_csv(csv_file, report, timeline):
 
         # Enumerate unique remote hosts into their own section
         if server:
-            server = server.split(':')[0]
-            if server not in remote_servers and not server == 'localhost':
-                remote_servers.append(server)
+            # server.split(':')[0] is a bad method as it breaks IPv6
+            server_host, server_port = network_split_host_port(server)
+            if server_host not in remote_servers and not server_host == 'localhost':
+                remote_servers.append(server_host)
     # } End of file input processing
 
     time_parse_csv_end = time.time()
@@ -1315,6 +1412,7 @@ def main():
     parser.add_argument('--config', help='Specify configuration file', required=False)
     parser.add_argument('--hash', help='Specify hash approvelist file', required=False)
     parser.add_argument('--hashtype', help='Specify hash type', required=False, choices=valid_hash_types)
+    parser.add_argument('--disable-file-hash', action='store_true', help='Disable hashing new files', required=False)
     parser.add_argument('--headless', action='store_true', help='Do not open results on VM after processing',
                         required=False)
     parser.add_argument('--human', action='store_true', help='Perform human activity', required=False)
@@ -1374,6 +1472,9 @@ def main():
     if config['generalize_paths']:
         generalize_vars_init()
 
+    if args.disable_file_hash:
+        config['disable-file-hash'] = True
+
     if args.headless:
         config['headless'] = True
 
@@ -1409,12 +1510,6 @@ def main():
             log_debug('[*] Using filter file: {}'.format(pmc_file))
     else:
         use_pmc = False
-
-    # Find a valid procmon executable.
-    procmonexe = check_procmon()
-    if not procmonexe:
-        print('[!] Unable to find Procmon ({}) in path.'.format(config['procmon']))
-        terminate_self(2)
 
     # Check to see if specified output folder exists. If not, make it.
     # This only works one path deep. In future, may make it recursive.
@@ -1461,6 +1556,12 @@ def main():
             txt_file = os.path.join(config['output_folder'], pml_basename + '.' + config['txt_extension'])
             debug_file = os.path.join(config['output_folder'], pml_basename + '.log')
             timeline_file = os.path.join(config['output_folder'], pml_basename + '_timeline.csv')
+
+            # Converting a PML to CSV requires procmon (unlike re-parsing a CSV)
+            procmonexe = check_procmon()
+            if not procmonexe:
+                print('[!] Unable to find Procmon ({}) in path.'.format(config['procmon']))
+                terminate_self(2)
 
             process_pml_to_csv(procmonexe, args.pml, pmc_file, csv_file)
             if not file_exists(csv_file):
@@ -1524,6 +1625,12 @@ def main():
     else:
         exe_cmdline = ''
 
+    # Find a valid procmon executable.
+    procmonexe = check_procmon()
+    if not procmonexe:
+        print('[!] Unable to find Procmon ({}) in path.'.format(config['procmon']))
+        terminate_self(2)
+
     # Start main data collection and processing
     print('[*] Using procmon EXE: {}'.format(procmonexe))
     session_id = get_session_name()
@@ -1533,11 +1640,14 @@ def main():
     debug_file = os.path.join(config['output_folder'], 'Noriben_{}.log'.format(session_id))
 
     timeline_file = os.path.join(config['output_folder'], 'Noriben_{}_timeline.csv'.format(session_id))
+
     print('[*] Procmon session saved to: {}'.format(pml_file))
 
-    if exe_cmdline and not file_exists(exe_cmdline):
-        print('[!] Error: Specified malware executable does not exist: {}'.format(exe_cmdline))
-        terminate_self(6)
+    if exe_cmdline:
+        exe_cmdline_base_file = shlex.split(exe_cmdline, posix=False)[0]
+        if not file_exists(exe_cmdline_base_file):
+            print('[!] Error: Specified malware executable does not exist: {}'.format(exe_cmdline_base_file))
+            terminate_self(6)
 
     print('[*] Launching Procmon ...')
     launch_procmon_capture(procmonexe, pml_file, pmc_file)
