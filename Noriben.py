@@ -8,6 +8,18 @@
 # clean text report and timeline
 #
 # Changelog:
+# Version 2.2.0 - 04 Jun 2026 (poppopjmp fork)
+#       New feature: automated triage for reverse engineers
+#           Added a "Behavioral Summary & Indicators of Compromise" section at
+#           the top of every report: activity counts, dropped-file hashes, and
+#           network endpoints at a glance
+#           Heuristic MITRE ATT&CK tagging of registry, file, and command-line
+#           activity (persistence, service creation, scheduled tasks, LOLBINs,
+#           recovery inhibition, defense evasion, etc.)
+#           Added --json to emit a structured, machine-readable *.iocs.json
+#           report (processes, files, registry, network, IOCs, ATT&CK) for
+#           ingestion by other tooling. The IOC summary is also fed to the AI
+#           analysis so its assessment is better grounded
 # Version 2.1.0 - 04 Jun 2026 (poppopjmp fork)
 #       New feature: AI-assisted report analysis
 #           Added --ai to send the generated report to an OpenAI-compatible
@@ -200,7 +212,7 @@ except ImportError:
     configparser = None
 
 # Below are global internal variables. Do not edit these. ################
-__VERSION__ = '2.1.0'
+__VERSION__ = '2.2.0'
 use_pmc = False
 use_virustotal = False
 vt_results = {}
@@ -307,6 +319,7 @@ def read_config(config_filename):
     # Apply defaults for optional/newer settings so older config files keep working
     optional_defaults = {
         'disable-file-hash': False,
+        'json_report': False,
         'ai_enabled': False,
         'ai_provider': 'ollama',
         'ai_base_url': '',
@@ -716,13 +729,24 @@ def open_file_with_assoc(fname):
     """
     log_debug('[*] Opening with OS associated application: {}'.format(fname))
 
-    if os.name == 'mac':
-        return subprocess.call(('open', fname))
-    if os.name == 'nt':
-        # os.startfile(fname)
-        return subprocess.call(('start', fname), shell=True)
-    if os.name == 'posix':
-        return subprocess.call(('open', fname))
+    # In headless/automated runs we never want to pop a viewer window
+    if config.get('headless'):
+        log_debug('[*] Headless mode enabled; not opening {}'.format(fname))
+        return None
+
+    try:
+        if sys.platform == 'darwin':
+            return subprocess.call(('open', fname))
+        if os.name == 'nt':
+            # os.startfile(fname)
+            return subprocess.call(('start', fname), shell=True)
+        if sys.platform.startswith('linux'):
+            return subprocess.call(('xdg-open', fname))
+        if os.name == 'posix':
+            return subprocess.call(('open', fname))
+    except (OSError, subprocess.SubprocessError) as err:
+        # Common when reprocessing a CSV on a headless/non-desktop host
+        log_debug('[!] Could not open {} with associated application: {}'.format(fname, err))
 
     return None
 
@@ -931,6 +955,252 @@ def terminate_procmon(procmonexe):
     except subprocess.TimeoutExpired:
         process.kill()
         stdout, stderr = process.communicate()
+
+
+# Regexes used to turn Noriben's human-readable report lines back into
+# structured records for IOC extraction and JSON export.
+_TAGGED_LINE_RE = re.compile(r'^\[(?P<tag>[^\]]+)\]\s+(?P<proc>.+?):(?P<pid>\d+)\s+>\s+(?P<rest>.*)$')
+_HASH_RE = re.compile(r'\[(?:MD5|SHA1|SHA256):\s*(?P<hash>[0-9a-fA-F]{32,64})\]')
+_CHILD_PID_RE = re.compile(r'\[Child PID:\s*(\d+)\]')
+
+# Heuristic MITRE ATT&CK rules. Each entry: (compiled_regex, technique_id, name)
+# Applied to registry keys, created-file paths, and process command lines.
+_REGISTRY_ATTACK_RULES = [
+    (re.compile(r'\\CurrentVersion\\Run(Once)?\b', re.I), 'T1547.001', 'Registry Run Keys / Startup Folder'),
+    (re.compile(r'\\Policies\\Explorer\\Run\b', re.I), 'T1547.001', 'Registry Run Keys / Startup Folder'),
+    (re.compile(r'\\CurrentVersion\\Windows\\(Load|Run)\b', re.I), 'T1547.001', 'Registry Run Keys / Startup Folder'),
+    (re.compile(r'\\Winlogon\b', re.I), 'T1547.004', 'Winlogon Helper DLL'),
+    (re.compile(r'\\CurrentControlSet\\Services\\', re.I), 'T1543.003', 'Create or Modify System Process: Windows Service'),
+    (re.compile(r'\\Image File Execution Options\\', re.I), 'T1546.012', 'Image File Execution Options Injection'),
+    (re.compile(r'AppInit_DLLs', re.I), 'T1546.010', 'AppInit DLLs'),
+    (re.compile(r'\\CurrentVersion\\Explorer\\(User Shell Folders|Shell Folders)\b', re.I), 'T1547.001', 'Registry Run Keys / Startup Folder'),
+]
+_FILE_ATTACK_RULES = [
+    (re.compile(r'\\Start Menu\\Programs\\Startup\\', re.I), 'T1547.001', 'Registry Run Keys / Startup Folder'),
+    (re.compile(r'\\System32\\Tasks\\|\\Windows\\Tasks\\', re.I), 'T1053.005', 'Scheduled Task'),
+]
+_CMDLINE_ATTACK_RULES = [
+    (re.compile(r'\bschtasks\b', re.I), 'T1053.005', 'Scheduled Task'),
+    (re.compile(r'\bsc(\.exe)?\b.*\bcreate\b', re.I), 'T1543.003', 'Create or Modify System Process: Windows Service'),
+    (re.compile(r'\bpowershell\b', re.I), 'T1059.001', 'Command and Scripting Interpreter: PowerShell'),
+    (re.compile(r'(?:^|\s)-e(?:nc|ncodedcommand)?\s+[A-Za-z0-9+/=]{16,}', re.I), 'T1027', 'Obfuscated Files or Information'),
+    (re.compile(r'\bcmd(\.exe)?\b\s+/c\b', re.I), 'T1059.003', 'Command and Scripting Interpreter: Windows Command Shell'),
+    (re.compile(r'\b(wscript|cscript)\b', re.I), 'T1059.005', 'Command and Scripting Interpreter: Visual Basic'),
+    (re.compile(r'\bvssadmin\b.*\bdelete\b', re.I), 'T1490', 'Inhibit System Recovery'),
+    (re.compile(r'\bwmic\b.*shadowcopy.*delete', re.I), 'T1490', 'Inhibit System Recovery'),
+    (re.compile(r'\bbcdedit\b', re.I), 'T1490', 'Inhibit System Recovery'),
+    (re.compile(r'\brundll32\b', re.I), 'T1218.011', 'System Binary Proxy Execution: Rundll32'),
+    (re.compile(r'\bregsvr32\b', re.I), 'T1218.010', 'System Binary Proxy Execution: Regsvr32'),
+    (re.compile(r'\bmshta\b', re.I), 'T1218.005', 'System Binary Proxy Execution: Mshta'),
+    (re.compile(r'\bcertutil\b', re.I), 'T1140', 'Deobfuscate/Decode Files or Information'),
+    (re.compile(r'\bbitsadmin\b', re.I), 'T1197', 'BITS Jobs'),
+    (re.compile(r'\bnetsh\b.*firewall', re.I), 'T1562.004', 'Impair Defenses: Disable or Modify System Firewall'),
+    (re.compile(r'\battrib\b.*\+h', re.I), 'T1564.001', 'Hide Artifacts: Hidden Files and Directories'),
+    (re.compile(r'\b(taskkill|net\s+stop)\b', re.I), 'T1562.001', 'Impair Defenses: Disable or Modify Tools'),
+]
+
+
+def analyze_indicators(process_output, file_output, reg_output, net_output, remote_servers, hash_type='SHA256'):
+    """
+    Turn Noriben's categorized report lines into structured indicators that
+    are useful to a reverse engineer: created/deleted/renamed files (with
+    hashes), registry writes, network endpoints, and a deduplicated list of
+    dropped-file hashes.
+
+    Arguments:
+        process_output, file_output, reg_output, net_output: lists of report
+            lines produced by parse_csv
+        remote_servers: list of unique remote host strings
+        hash_type: configured hash algorithm name (for labeling)
+    Returns:
+        dict of structured indicators
+    """
+    indicators = {
+        'processes': [],
+        'files_created': [],
+        'files_deleted': [],
+        'files_renamed': [],
+        'registry': [],
+        'network_hosts': sorted({protocol_replace(s).strip() for s in remote_servers if s.strip()}),
+        'network_connections': list(net_output),
+        'dropped_file_hashes': []
+    }
+
+    for line in process_output:
+        match = _TAGGED_LINE_RE.match(line)
+        if not match:
+            continue
+        rest = match.group('rest')
+        # parse_csv wraps the command line in literal quotes; drop them
+        cmdline = rest.split('\t')[0].strip().strip('"')
+        child = _CHILD_PID_RE.search(rest)
+        indicators['processes'].append({
+            'process': match.group('proc').strip(),
+            'pid': match.group('pid'),
+            'command_line': cmdline,
+            'child_pid': child.group(1) if child else None
+        })
+
+    seen_hashes = set()
+    for line in file_output:
+        match = _TAGGED_LINE_RE.match(line)
+        if not match:
+            continue
+        tag = match.group('tag')
+        rest = match.group('rest')
+        path = rest.split('\t')[0].strip()
+        if tag == 'CreateFile':
+            hash_match = _HASH_RE.search(rest)
+            hashval = hash_match.group('hash') if hash_match else None
+            indicators['files_created'].append({'path': path, 'hash': hashval})
+            if hashval and hashval not in seen_hashes:
+                seen_hashes.add(hashval)
+                indicators['dropped_file_hashes'].append(
+                    {'path': path, 'hash': hashval, 'hash_type': hash_type})
+        elif tag == 'DeleteFile':
+            indicators['files_deleted'].append(path)
+        elif tag == 'RenameFile':
+            if ' => ' in path:
+                src, dst = path.split(' => ', 1)
+                indicators['files_renamed'].append({'from': src.strip(), 'to': dst.strip()})
+            else:
+                indicators['files_renamed'].append({'from': path, 'to': None})
+
+    for line in reg_output:
+        match = _TAGGED_LINE_RE.match(line)
+        if not match:
+            continue
+        rest = match.group('rest')
+        key = rest.split('  =  ')[0].strip()
+        data = rest.split('  =  ', 1)[1].strip() if '  =  ' in rest else None
+        indicators['registry'].append({'operation': match.group('tag'), 'key': key, 'data': data})
+
+    return indicators
+
+
+def detect_attack_techniques(indicators):
+    """
+    Apply heuristic MITRE ATT&CK rules to structured indicators.
+
+    Arguments:
+        indicators: dict produced by analyze_indicators()
+    Returns:
+        list of {'id', 'technique', 'evidence'} dicts, sorted by technique id
+    """
+    techniques = {}
+
+    def add(tid, name, evidence):
+        entry = techniques.setdefault(tid, {'id': tid, 'technique': name, 'evidence': []})
+        if evidence and evidence not in entry['evidence'] and len(entry['evidence']) < 5:
+            entry['evidence'].append(evidence)
+
+    for item in indicators['registry']:
+        for pattern, tid, name in _REGISTRY_ATTACK_RULES:
+            if pattern.search(item['key']):
+                add(tid, name, item['key'])
+
+    for item in indicators['files_created']:
+        for pattern, tid, name in _FILE_ATTACK_RULES:
+            if pattern.search(item['path']):
+                add(tid, name, item['path'])
+
+    for item in indicators['processes']:
+        for pattern, tid, name in _CMDLINE_ATTACK_RULES:
+            if pattern.search(item['command_line']):
+                add(tid, name, item['command_line'])
+
+    if indicators['files_deleted']:
+        add('T1070.004', 'Indicator Removal: File Deletion', indicators['files_deleted'][0])
+    if indicators['network_hosts']:
+        add('T1071', 'Application Layer Protocol', indicators['network_hosts'][0])
+
+    return sorted(techniques.values(), key=lambda t: t['id'])
+
+
+def format_analysis_section(indicators, techniques):
+    """
+    Render a concise, human-readable "Behavioral Summary & IOCs" section for
+    the top of the text report.
+
+    Arguments:
+        indicators: dict from analyze_indicators()
+        techniques: list from detect_attack_techniques()
+    Returns:
+        list of report line strings
+    """
+    lines = ['Behavioral Summary & Indicators of Compromise:',
+             '==================',
+             '[*] Processes created: {}   Files created: {}   Files deleted: {}   '
+             'Registry writes: {}   Network hosts: {}'.format(
+                 len(indicators['processes']), len(indicators['files_created']),
+                 len(indicators['files_deleted']), len(indicators['registry']),
+                 len(indicators['network_hosts'])),
+             '']
+
+    if techniques:
+        lines.append('MITRE ATT&CK techniques observed (heuristic):')
+        for technique in techniques:
+            lines.append('  [{}] {}'.format(technique['id'], technique['technique']))
+            for evidence in technique['evidence']:
+                lines.append('      - {}'.format(evidence[:160]))
+    else:
+        lines.append('No notable ATT&CK techniques detected by built-in heuristics.')
+    lines.append('')
+
+    if indicators['dropped_file_hashes']:
+        lines.append('Dropped file hashes:')
+        for dropped in indicators['dropped_file_hashes']:
+            lines.append('  {}  {}'.format(dropped['hash'], dropped['path']))
+        lines.append('')
+
+    if indicators['network_hosts']:
+        lines.append('Network endpoints:')
+        for host in indicators['network_hosts']:
+            lines.append('  {}'.format(host))
+        lines.append('')
+
+    return lines
+
+
+def build_json_report(indicators, techniques, metadata):
+    """
+    Assemble a machine-readable report suitable for ingestion by other tooling.
+
+    Arguments:
+        indicators: dict from analyze_indicators()
+        techniques: list from detect_attack_techniques()
+        metadata: dict of run metadata (version, timestamp, command line, etc.)
+    Returns:
+        dict ready to be serialized to JSON
+    """
+    return {
+        'noriben': metadata,
+        'summary': {
+            'processes': len(indicators['processes']),
+            'files_created': len(indicators['files_created']),
+            'files_deleted': len(indicators['files_deleted']),
+            'files_renamed': len(indicators['files_renamed']),
+            'registry_writes': len(indicators['registry']),
+            'network_hosts': len(indicators['network_hosts']),
+            'attack_techniques': len(techniques)
+        },
+        'attack_techniques': techniques,
+        'processes': indicators['processes'],
+        'files': {
+            'created': indicators['files_created'],
+            'deleted': indicators['files_deleted'],
+            'renamed': indicators['files_renamed']
+        },
+        'registry': indicators['registry'],
+        'network': {
+            'hosts': indicators['network_hosts'],
+            'connections': indicators['network_connections']
+        },
+        'iocs': {
+            'file_hashes': indicators['dropped_file_hashes'],
+            'hosts': indicators['network_hosts']
+        }
+    }
 
 
 def parse_csv(csv_file, report, timeline):
@@ -1174,6 +1444,12 @@ def parse_csv(csv_file, report, timeline):
 
     time_parse_csv_end = time.time()
 
+    # Build structured indicators and heuristic ATT&CK tags for the summary
+    # section and the optional JSON report.
+    indicators = analyze_indicators(process_output, file_output, reg_output,
+                                    net_output, remote_servers, config['hash_type'])
+    attack_techniques = detect_attack_techniques(indicators)
+
     report.append('-=] Sandbox Analysis Report generated by Noriben v{}'.format(__VERSION__))
     report.append('-=] https://github.com/Rurik/Noriben')
     report.append('')
@@ -1188,6 +1464,9 @@ def parse_csv(csv_file, report, timeline):
     time_analyze = time_parse_csv_end - time_parse_csv_start
     report.append('-=] Analysis time: {:.2f} seconds'.format(time_analyze))
     report.append('')
+
+    for summary_line in format_analysis_section(indicators, attack_techniques):
+        report.append(summary_line)
 
     report.append('Processes Created:')
     report.append('==================')
@@ -1229,6 +1508,23 @@ def parse_csv(csv_file, report, timeline):
         log_debug('[*] Writing {} Output Errors results to report'.format(len(error_output)))
         for error in error_output:
             report.append(error)
+
+    if config.get('json_report'):
+        json_report_file = os.path.splitext(csv_file)[0] + '.iocs.json'
+        metadata = {
+            'version': __VERSION__,
+            'generated': datetime.datetime.now().isoformat(timespec='seconds'),
+            'command_line': exe_cmdline,
+            'hash_type': config['hash_type'],
+            'source_csv': os.path.basename(csv_file)
+        }
+        try:
+            with open(json_report_file, 'w', encoding='utf-8') as json_out:
+                json.dump(build_json_report(indicators, attack_techniques, metadata),
+                          json_out, indent=2, sort_keys=False)
+            print('[*] Saving JSON IOC report to: {}'.format(json_report_file))
+        except OSError as err:
+            log_debug('[!] Unable to write JSON report {}: {}'.format(json_report_file, err))
 
     if config['debug'] and vt_dump:
         vt_file = os.path.join(config['output_folder'], os.path.splitext(csv_file)[0] + '.vt.json')
@@ -1413,6 +1709,8 @@ def main():
     parser.add_argument('--hash', help='Specify hash approvelist file', required=False)
     parser.add_argument('--hashtype', help='Specify hash type', required=False, choices=valid_hash_types)
     parser.add_argument('--disable-file-hash', action='store_true', help='Disable hashing new files', required=False)
+    parser.add_argument('--json', action='store_true',
+                        help='Also write a structured JSON report with IOCs and ATT&CK tags', required=False)
     parser.add_argument('--headless', action='store_true', help='Do not open results on VM after processing',
                         required=False)
     parser.add_argument('--human', action='store_true', help='Perform human activity', required=False)
@@ -1474,6 +1772,9 @@ def main():
 
     if args.disable_file_hash:
         config['disable-file-hash'] = True
+
+    if args.json:
+        config['json_report'] = True
 
     if args.headless:
         config['headless'] = True

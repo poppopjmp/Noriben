@@ -49,6 +49,34 @@ You can automate the script for sandbox-usage. Using -t <seconds> to automate ex
 
 The --generalize feature will automatically substitute absolute paths with Windows environment paths for better IOC development. For example, C:\Users\malware_user\AppData\Roaming\malware.exe will be automatically resolved to %AppData%\malware.exe.
 
+# Automated Triage: IOCs, MITRE ATT&CK & JSON
+
+Every report now opens with a **Behavioral Summary & Indicators of Compromise**
+section so an analyst can see the important findings without scrolling through
+the full event log:
+
+* activity counts (processes, files created/deleted, registry writes, hosts)
+* dropped-file hashes
+* network endpoints
+* **heuristic MITRE ATT&CK technique tags** with the evidence that triggered
+  them — persistence (Run keys, services, scheduled tasks, Winlogon, IFEO),
+  LOLBIN execution (rundll32, regsvr32, mshta, certutil, bitsadmin), encoded
+  PowerShell, recovery inhibition (vssadmin/bcdedit), defense evasion, and more
+
+Add `--json` to also write a structured, machine-readable `*.iocs.json` next to
+the report. It contains the parsed processes, file/registry/network activity,
+extracted IOCs, and the ATT&CK tags — ready to feed into your own tooling, a
+threat-intel platform, or a run-to-run diff:
+
+<pre>
+python Noriben.py --json                       # live capture + JSON IOC report
+python Noriben.py --csv Noriben_12_Jan.csv --json   # re-triage an existing CSV
+</pre>
+
+Both can be enabled persistently via `json_report` in `Noriben.config`. When AI
+analysis is also enabled, this IOC summary is part of what the model sees, so
+its assessment is better grounded in the actual indicators.
+
 # AI-Assisted Report Analysis
 
 Noriben can hand the generated report to a Large Language Model to produce an
