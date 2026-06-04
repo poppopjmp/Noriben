@@ -8,6 +8,15 @@
 # clean text report and timeline
 #
 # Changelog:
+# Version 2.4.0 - 04 Jun 2026 (poppopjmp fork)
+#       Detection-engineering exports:
+#           --gen-sigma writes Sigma detection rules (*.sigma.yml) for dropped
+#           executables, registry persistence, network endpoints, named pipes,
+#           and suspicious command lines, tagged with MITRE ATT&CK
+#           Stronger suggested YARA rules (now also include autostart/Run value
+#           names that commonly appear in the binary)
+#           --diff now also writes a self-contained HTML diff report
+#           (*.diff.html) alongside the in-report text diff
 # Version 2.3.0 - 04 Jun 2026 (poppopjmp fork)
 #       More reverse-engineering value:
 #           Extract named pipes and mutexes (infection markers) from activity
@@ -223,7 +232,7 @@ except ImportError:
     configparser = None
 
 # Below are global internal variables. Do not edit these. ################
-__VERSION__ = '2.3.0'
+__VERSION__ = '2.4.0'
 use_pmc = False
 use_virustotal = False
 vt_results = {}
@@ -332,6 +341,7 @@ def read_config(config_filename):
         'disable-file-hash': False,
         'json_report': False,
         'gen_yara': False,
+        'gen_sigma': False,
         'stix_export': False,
         'misp_export': False,
         'ai_enabled': False,
@@ -1268,7 +1278,7 @@ def build_yara_rule(indicators, rule_name='Noriben_Suspected_Sample', hash_type=
     """
     strings = []
     seen = set()
-    counters = {'file': 0, 'mutex': 0, 'pipe': 0, 'net': 0}
+    counters = {'file': 0, 'mutex': 0, 'pipe': 0, 'net': 0, 'reg': 0}
 
     def add_string(kind, value):
         value = (value or '').strip()
@@ -1290,6 +1300,13 @@ def build_yara_rule(indicators, rule_name='Noriben_Suspected_Sample', hash_type=
         add_string('pipe', pipe)
     for host in indicators.get('network_hosts', []):
         add_string('net', host)
+    # Autostart value names (e.g. the leaf of a Run key) often appear verbatim
+    # in the binary, so they make useful YARA strings.
+    for item in indicators.get('registry', []):
+        key = item.get('key', '')
+        if any(pattern.search(key) for pattern, _tid, _name in _REGISTRY_ATTACK_RULES):
+            leaf = key.rstrip('\\').split('\\')[-1]
+            add_string('reg', leaf)
 
     if not strings:
         return ''
@@ -1474,6 +1491,201 @@ def build_misp_event(indicators, metadata):
             'Attribute': attributes
         }
     }
+
+
+def _sigma_attack_tags(technique_ids):
+    """Convert MITRE technique ids (e.g. 'T1547.001') into Sigma attack tags."""
+    return ['attack.{}'.format(tid.lower()) for tid in technique_ids]
+
+
+def build_sigma_rules(indicators, techniques, metadata):
+    """
+    Generate Sigma detection rules from the run's indicators. Produces targeted
+    rules for dropped executables, registry persistence, network endpoints,
+    named pipes, and suspicious process command lines.
+
+    Arguments:
+        indicators: dict from analyze_indicators()
+        techniques: list from detect_attack_techniques()
+        metadata: dict of run metadata
+    Returns:
+        list of Sigma rule dicts (each a complete rule)
+    """
+    date = (metadata.get('generated') or datetime.datetime.now().isoformat()).split('T')[0].replace('-', '/')
+    author = 'Noriben v{}'.format(__VERSION__)
+    technique_ids = [t['id'] for t in techniques]
+    rules = []
+
+    def new_rule(title, description, category, selection, tags, level='medium'):
+        return {
+            'title': title,
+            'id': str(uuid.uuid4()),
+            'status': 'experimental',
+            'description': description,
+            'author': author,
+            'date': date,
+            'logsource': {'category': category, 'product': 'windows'},
+            'detection': {'selection': selection, 'condition': 'selection'},
+            'falsepositives': ['Unknown'],
+            'level': level,
+            'tags': tags
+        }
+
+    dropped_exes = sorted({entry['path'].rstrip('\\').split('\\')[-1].split('/')[-1]
+                           for entry in indicators.get('files_created', [])
+                           if entry['path'].lower().endswith(('.exe', '.dll', '.scr', '.sys'))})
+    if dropped_exes:
+        rules.append(new_rule(
+            'Noriben - Dropped Executable Created',
+            'Creation of an executable observed during dynamic analysis.',
+            'file_event',
+            {'TargetFilename|endswith': ['\\' + name for name in dropped_exes]},
+            ['attack.execution']))
+
+    persistence_keys = sorted({item['key'] for item in indicators.get('registry', [])
+                               if any(p.search(item['key']) for p, _i, _n in _REGISTRY_ATTACK_RULES)})
+    if persistence_keys:
+        rules.append(new_rule(
+            'Noriben - Registry Persistence Modification',
+            'Modification of an autostart/persistence registry location.',
+            'registry_set',
+            {'TargetObject|contains': persistence_keys},
+            ['attack.persistence'] + _sigma_attack_tags(
+                [tid for tid in technique_ids if tid.startswith(('T1547', 'T1543', 'T1546'))]),
+            level='high'))
+
+    domains = [h for h in indicators.get('network_hosts', []) if not _is_ip(h.split(':')[0])]
+    ips = [h.split(':')[0] for h in indicators.get('network_hosts', []) if _is_ip(h.split(':')[0])]
+    net_selection = {}
+    if domains:
+        net_selection['DestinationHostname'] = domains
+    if ips:
+        net_selection['DestinationIp'] = ips
+    if net_selection:
+        rules.append(new_rule(
+            'Noriben - Network Connection to Observed Host',
+            'Network connection to an endpoint contacted during dynamic analysis.',
+            'network_connection',
+            net_selection,
+            ['attack.command_and_control', 'attack.t1071']))
+
+    if indicators.get('named_pipes'):
+        rules.append(new_rule(
+            'Noriben - Named Pipe Created',
+            'Creation of a named pipe observed during dynamic analysis.',
+            'pipe_created',
+            {'PipeName|contains': sorted(indicators['named_pipes'])},
+            ['attack.defense_evasion']))
+
+    cmd_tokens = sorted({item['command_line'] for item in indicators.get('processes', [])
+                         if any(p.search(item['command_line']) for p, _i, _n in _CMDLINE_ATTACK_RULES)})
+    if cmd_tokens:
+        rules.append(new_rule(
+            'Noriben - Suspicious Process Command Line',
+            'Process command line matching a suspicious pattern seen during analysis.',
+            'process_creation',
+            {'CommandLine|contains': cmd_tokens},
+            ['attack.execution'] + _sigma_attack_tags(
+                [tid for tid in technique_ids if tid.startswith(('T1059', 'T1218', 'T1053', 'T1490', 'T1562'))])))
+
+    return rules
+
+
+def _is_ip(value):
+    """True if value parses as an IPv4/IPv6 address."""
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _yaml_scalar(value):
+    """Render a scalar as a safely single-quoted YAML string (or bare int)."""
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, int):
+        return str(value)
+    return "'{}'".format(str(value).replace("'", "''"))
+
+
+def _yaml_dump(value, indent=0):
+    """
+    Minimal YAML emitter for the controlled Sigma rule structure (nested maps,
+    lists of scalars, and scalar values). Avoids a hard PyYAML dependency.
+    """
+    pad = '    ' * indent
+    lines = []
+    if isinstance(value, dict):
+        for key, val in value.items():
+            if isinstance(val, (dict, list)) and val:
+                lines.append('{}{}:'.format(pad, key))
+                lines.extend(_yaml_dump(val, indent + 1))
+            elif isinstance(val, (dict, list)):
+                lines.append('{}{}: []'.format(pad, key) if isinstance(val, list)
+                             else '{}{}: {{}}'.format(pad, key))
+            else:
+                lines.append('{}{}: {}'.format(pad, key, _yaml_scalar(val)))
+    elif isinstance(value, list):
+        for item in value:
+            lines.append('{}- {}'.format(pad, _yaml_scalar(item)))
+    return lines
+
+
+def sigma_rules_to_yaml(rules):
+    """Serialize a list of Sigma rule dicts to a multi-document YAML string."""
+    documents = ['\n'.join(_yaml_dump(rule)) for rule in rules]
+    return '\n---\n'.join(documents) + ('\n' if documents else '')
+
+
+def build_diff_html(diff, baseline_name, metadata):
+    """
+    Render a run-to-run diff as a small self-contained HTML page.
+
+    Arguments:
+        diff: dict from diff_reports()
+        baseline_name: name of the baseline report
+        metadata: dict of run metadata
+    Returns:
+        HTML string
+    """
+    def esc(text):
+        return (str(text).replace('&', '&amp;').replace('<', '&lt;')
+                .replace('>', '&gt;').replace('"', '&quot;'))
+
+    labels = [('attack_techniques', 'ATT&CK techniques'), ('processes', 'Processes'),
+              ('files_created', 'Files created'), ('file_hashes', 'File hashes'),
+              ('registry', 'Registry keys'), ('network_hosts', 'Network hosts'),
+              ('mutexes', 'Mutexes'), ('named_pipes', 'Named pipes')]
+
+    body = []
+    for key, label in labels:
+        added = diff.get(key, {}).get('added', [])
+        removed = diff.get(key, {}).get('removed', [])
+        if not added and not removed:
+            continue
+        body.append('<h2>{}</h2><ul>'.format(esc(label)))
+        for item in added:
+            body.append('<li class="add">+ {}</li>'.format(esc(item)))
+        for item in removed:
+            body.append('<li class="del">- {}</li>'.format(esc(item)))
+        body.append('</ul>')
+    if not body:
+        body.append('<p>No differences from baseline.</p>')
+
+    return (
+        '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">\n'
+        '<title>Noriben Diff vs {baseline}</title>\n'
+        '<style>body{{font-family:Segoe UI,Arial,sans-serif;margin:2em;color:#222}}'
+        'h1{{font-size:1.4em}}h2{{font-size:1.1em;border-bottom:1px solid #ccc;padding-bottom:2px}}'
+        'ul{{list-style:none;padding-left:0}}li{{font-family:Consolas,monospace;padding:1px 0}}'
+        '.add{{color:#0a7d00}}.del{{color:#b00020}}.meta{{color:#666;font-size:.9em}}</style>'
+        '</head><body>\n'
+        '<h1>Noriben run-to-run diff</h1>\n'
+        '<p class="meta">Baseline: {baseline} &middot; Noriben v{version} &middot; {generated}</p>\n'
+        '{body}\n</body></html>\n'
+    ).format(baseline=esc(baseline_name), version=esc(metadata.get('version', '')),
+             generated=esc(metadata.get('generated', '')), body='\n'.join(body))
 
 
 def parse_csv(csv_file, report, timeline):
@@ -1750,13 +1962,14 @@ def parse_csv(csv_file, report, timeline):
         report.append(summary_line)
 
     # Optional run-to-run diff against a previously saved JSON IOC report
+    diff_result = None
     baseline_path = config.get('diff_against')
     if baseline_path:
         try:
             with open(baseline_path, encoding='utf-8') as baseline_handle:
                 baseline_report = json.load(baseline_handle)
-            diff = diff_reports(baseline_report, json_report_data)
-            for diff_line in format_diff_section(diff, os.path.basename(baseline_path)):
+            diff_result = diff_reports(baseline_report, json_report_data)
+            for diff_line in format_diff_section(diff_result, os.path.basename(baseline_path)):
                 report.append(diff_line)
         except (OSError, ValueError) as err:
             print('[!] Could not load diff baseline {}: {}'.format(baseline_path, err))
@@ -1831,6 +2044,12 @@ def parse_csv(csv_file, report, timeline):
                   lambda: build_stix_bundle(indicators, report_metadata))
     _write_export(config.get('misp_export'), '.misp.json', 'MISP event',
                   lambda: build_misp_event(indicators, report_metadata))
+    _write_export(config.get('gen_sigma'), '.sigma.yml', 'Sigma rules',
+                  lambda: sigma_rules_to_yaml(build_sigma_rules(indicators, attack_techniques, report_metadata)),
+                  as_json=False)
+    _write_export(diff_result is not None, '.diff.html', 'HTML diff report',
+                  lambda: build_diff_html(diff_result, os.path.basename(baseline_path), report_metadata),
+                  as_json=False)
 
     if config['debug'] and vt_dump:
         vt_file = os.path.join(config['output_folder'], os.path.splitext(csv_file)[0] + '.vt.json')
@@ -2019,6 +2238,8 @@ def main():
                         help='Also write a structured JSON report with IOCs and ATT&CK tags', required=False)
     parser.add_argument('--gen-yara', action='store_true',
                         help='Generate a suggested YARA rule from behavioral indicators', required=False)
+    parser.add_argument('--gen-sigma', action='store_true',
+                        help='Generate Sigma detection rules (*.sigma.yml) from indicators', required=False)
     parser.add_argument('--stix', action='store_true',
                         help='Export IOCs as a STIX 2.1 bundle (*.stix.json)', required=False)
     parser.add_argument('--misp', action='store_true',
@@ -2091,6 +2312,8 @@ def main():
         config['json_report'] = True
     if args.gen_yara:
         config['gen_yara'] = True
+    if args.gen_sigma:
+        config['gen_sigma'] = True
     if args.stix:
         config['stix_export'] = True
     if args.misp:

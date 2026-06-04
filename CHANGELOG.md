@@ -5,6 +5,23 @@ This fork tracks upstream [Rurik/Noriben](https://github.com/Rurik/Noriben)
 and adds analyst-focused features on top. Versions follow loose semantic
 versioning.
 
+## [2.4.0] - 2026-06-04
+
+Detection-engineering exports.
+
+### Added
+- **`--gen-sigma`** — write Sigma detection rules (`*.sigma.yml`) for dropped
+  executables, registry persistence, network endpoints, named pipes, and
+  suspicious command lines, each tagged with MITRE ATT&CK. Includes a small
+  built-in YAML emitter (no PyYAML dependency).
+- **`--diff`** now also writes a self-contained **HTML diff report**
+  (`*.diff.html`) alongside the in-report text diff.
+- `tests/test_detection_exports.py` (11 cases). Suite total: 66 tests.
+
+### Changed
+- Suggested YARA rules now also include autostart/Run **value names**, which
+  commonly appear verbatim in the binary.
+
 ## [2.3.0] - 2026-06-04
 
 Reverse-engineer-focused sharing and comparison.
