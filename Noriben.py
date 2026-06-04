@@ -3341,6 +3341,12 @@ def main():
                         required=False)
     parser.add_argument('--version', action='version', version='Noriben {}'.format(__VERSION__))
     args = parser.parse_args()
+
+    # The self-test only exercises the analysis engine and needs no config or
+    # Procmon, so run it before anything else (handy as a post-install check).
+    if args.selftest:
+        sys.exit(0 if run_selftest() else 50)
+
     report = []
     timeline = []
     script_cwd = os.path.dirname(os.path.abspath(__file__))
@@ -3401,10 +3407,6 @@ def main():
         config['misp_export'] = True
     if args.diff:
         config['diff_against'] = args.diff
-
-    # Built-in self-test of the analysis engine, then exit.
-    if args.selftest:
-        terminate_self(0 if run_selftest() else 50)
 
     # Consolidated multi-run mode: aggregate several JSON IOC reports and exit.
     if args.merge:
