@@ -49,6 +49,35 @@ You can automate the script for sandbox-usage. Using -t <seconds> to automate ex
 
 The --generalize feature will automatically substitute absolute paths with Windows environment paths for better IOC development. For example, C:\Users\malware_user\AppData\Roaming\malware.exe will be automatically resolved to %AppData%\malware.exe.
 
+# Verdict at a glance
+
+Every report now opens with a **deterministic verdict banner** so you can make
+a quick call on a sample without reading the whole log:
+
+<pre>
+==================================================
+ VERDICT: Malicious   (risk score 100/100, High confidence)
+==================================================
+Why:
+  - Inhibits system recovery (ransomware-like) (Inhibit System Recovery)
+  - Establishes persistence (Registry Run Keys / Startup Folder)
+  - Drops 1 executable file(s)
+  - Contacts 1 external network host(s)
+  ...
+</pre>
+
+The score is computed offline from the observed behavior and ATT&CK techniques
+(it does not require the AI feature), and every contributing reason is listed so
+the call is explainable. A **process tree** (parent → child) is also included.
+
+For an at-a-glance, shareable view, add `--html` to write a single-file HTML
+dashboard with the verdict, ATT&CK techniques, IOCs, process tree, and activity
+tables:
+
+<pre>
+python Noriben.py --csv sample.csv --html
+</pre>
+
 # Automated Triage: IOCs, MITRE ATT&CK & JSON
 
 Every report now opens with a **Behavioral Summary & Indicators of Compromise**
