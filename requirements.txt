@@ -1,0 +1,17 @@
+# Noriben runtime dependencies
+#
+# Core analysis (Noriben.py) — all optional features degrade gracefully if a
+# module is missing, but installing them enables the full feature set.
+requests>=2.28.0        # VirusTotal lookups/submission and AI report analysis (--ai)
+yara-python>=4.2.0      # --yara rule scanning of created files
+
+# Host/sandbox automation (NoribenSandbox.py)
+python-magic>=0.4.27    # file-type detection (requires libmagic on the host)
+pyautogui>=0.9.53       # optional screen interaction during automated runs
+
+# Notes:
+#   * configparser is part of the Python 3 standard library — no install needed.
+#   * python-magic needs the native libmagic library:
+#       Debian/Ubuntu : apt-get install libmagic1
+#       macOS (brew)  : brew install libmagic
+#       Windows       : pip install python-magic-bin

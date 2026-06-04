@@ -1,5 +1,7 @@
 ## <img src="https://raw.githubusercontent.com/Rurik/Noriben/master/images/noriben_logo.png" height=100> Noriben Malware Analysis Sandbox
-[![Black Hat Arsenal](https://raw.githubusercontent.com/Rurik/Noriben/27539fc60e37cd4c6d7bc764c32e8ba49ec0eee1/images/BlackHat_Arsenal_2015.svg)](http://www.toolswatch.org/2015/06/black-hat-arsenal-usa-2015-speakers-lineup/)
+![Black Hat Arsenal](https://raw.githubusercontent.com/toolswatch/badges/master/arsenal/usa/2015.svg) ![Black Hat Arsenal](https://raw.githubusercontent.com/toolswatch/badges/master/arsenal/usa/2023.svg)
+
+
 
 <pre>
 Contact Information:
@@ -47,10 +49,126 @@ You can automate the script for sandbox-usage. Using -t <seconds> to automate ex
 
 The --generalize feature will automatically substitute absolute paths with Windows environment paths for better IOC development. For example, C:\Users\malware_user\AppData\Roaming\malware.exe will be automatically resolved to %AppData%\malware.exe.
 
+# Automated Triage: IOCs, MITRE ATT&CK & JSON
+
+Every report now opens with a **Behavioral Summary & Indicators of Compromise**
+section so an analyst can see the important findings without scrolling through
+the full event log:
+
+* activity counts (processes, files created/deleted, registry writes, hosts)
+* dropped-file hashes
+* network endpoints
+* **heuristic MITRE ATT&CK technique tags** with the evidence that triggered
+  them — persistence (Run keys, services, scheduled tasks, Winlogon, IFEO),
+  LOLBIN execution (rundll32, regsvr32, mshta, certutil, bitsadmin), encoded
+  PowerShell, recovery inhibition (vssadmin/bcdedit), defense evasion, and more
+
+Add `--json` to also write a structured, machine-readable `*.iocs.json` next to
+the report. It contains the parsed processes, file/registry/network activity,
+extracted IOCs, and the ATT&CK tags — ready to feed into your own tooling, a
+threat-intel platform, or a run-to-run diff:
+
+<pre>
+python Noriben.py --json                       # live capture + JSON IOC report
+python Noriben.py --csv Noriben_12_Jan.csv --json   # re-triage an existing CSV
+</pre>
+
+Both can be enabled persistently via `json_report` in `Noriben.config`. When AI
+analysis is also enabled, this IOC summary is part of what the model sees, so
+its assessment is better grounded in the actual indicators.
+
+The summary also extracts **named pipes** and **mutexes** (common infection
+markers) from the captured activity.
+
+## Sharing & comparing results
+
+Noriben can turn a run into artifacts you can act on:
+
+<pre>
+--gen-yara   Write a suggested YARA rule (*.suggested.yar) built from the
+             behavioral indicators (dropped file names, mutexes, named pipes,
+             network hosts). A starting point to review, not a vetted rule.
+--stix       Export the IOCs as a STIX 2.1 bundle (*.stix.json)
+--misp       Export the IOCs as a MISP event (*.misp.json)
+--diff FILE  Compare this run against a previously saved *.iocs.json baseline
+             and print what was added/removed (processes, files, hashes,
+             registry keys, hosts, pipes, mutexes, ATT&CK techniques)
+</pre>
+
+Example — triage a sample, then diff a second variant against it:
+
+<pre>
+python Noriben.py --csv sample_a.csv --json --gen-yara --stix --misp
+python Noriben.py --csv sample_b.csv --diff sample_a.iocs.json
+</pre>
+
+`--gen-yara`, `--stix`, and `--misp` also have matching `gen_yara`,
+`stix_export`, and `misp_export` keys in `Noriben.config`.
+
+# AI-Assisted Report Analysis
+
+Noriben can hand the generated report to a Large Language Model to produce an
+automated behavioral analysis — an executive summary, notable behaviors,
+persistence mechanisms, network/host IOCs, and a Benign/Suspicious/Malicious
+risk assessment. The analysis is appended to the text report and also saved as
+a standalone `*_AI_Analysis.md` file.
+
+It works with **any OpenAI-compatible Chat Completions endpoint**, so you can
+keep everything local with [Ollama](https://ollama.com/) or point it at a hosted
+provider:
+
+<pre>
+# Local, private analysis with Ollama (no data leaves your machine)
+ollama serve
+ollama pull llama3.1
+python Noriben.py --ai --ai-provider ollama --ai-model llama3.1
+
+# Re-analyze an existing capture with a local model
+python Noriben.py --csv Noriben_12_Jan_25.csv --ai
+
+# Use the OpenAI API (or any compatible gateway: LM Studio, vLLM, LiteLLM)
+python Noriben.py --ai --ai-provider openai --ai-model gpt-4o-mini \
+    --ai-url https://api.openai.com/v1
+</pre>
+
+All AI options can also be set persistently in `Noriben.config` under the
+`[Noriben]` section (`ai_enabled`, `ai_provider`, `ai_base_url`, `ai_model`,
+`ai_api_key`, `ai_timeout`, `ai_max_chars`). The OpenAI provider needs an API
+key (`ai_api_key`, or pass it via the endpoint); local Ollama needs none. If the
+endpoint is unreachable the normal report is still produced — AI failures are
+never fatal.
+
+
+## Requirements & Installation
+
+Noriben requires **Python 3.8+** and the Sysinternals `procmon.exe` (run on the
+Windows analysis VM).
+
+Install the Python dependencies with:
+
+<pre>
+pip install -r requirements.txt
+</pre>
+
+All third-party modules are optional and the script degrades gracefully if one
+is missing:
+
+* `requests` — VirusTotal hash lookups / file submission
+* `yara-python` — `--yara` rule scanning of newly created files
+* `python-magic` + `pyautogui` — only needed for the host automation front end,
+  `NoribenSandbox.py` (`pip install -r requirements.txt` installs these too; on
+  Linux/macOS `python-magic` also needs the native `libmagic` library)
+
+Alternatively, install Noriben as a package (provides a `noriben` console
+command):
+
+<pre>
+pip install .
+</pre>
 
 Usage:
 <pre>
---===[ Noriben v1.7.2
+--===[ Noriben v2.0.1
 --===[ @bbaskin
 usage: Noriben.py [-h] [-c CSV] [-p PML] [-f FILTER] [--hash HASH]
                   [--hashtype {MD5,SHA1,SHA256}] [--headless] [-t TIMEOUT]

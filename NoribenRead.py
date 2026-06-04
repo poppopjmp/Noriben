@@ -42,23 +42,19 @@ def search_archive(args):
     #    print('[!] {} not found in archive {}'.format(args.log, args.file))
         return 1
 
-    resultsFound = False
     for line in contents:
-        try:
-            line = unicode(line.strip())
-        except UnicodeDecodeError:
-            pass
+        if isinstance(line, bytes):
+            line = line.decode('utf-8', errors='replace')
+        line = line.strip()
         if args.search:
             #args.search = bytes(mystring, 'utf-8')
             if args.insensitive:
                 if args.search.lower() in line.lower():
-                    resultsFound = True
                     if args.hide:
                         print(line)
                     else:
                         print('{}: {}'.format(archive_name, line.strip()))
             elif args.search in line:
-                resultsFound = True
                 if args.hide:
                     print(line)
                 else:

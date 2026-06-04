@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "noriben"
+version = "2.3.0"
+description = "Noriben Malware Analysis Sandbox — runtime indicator collection and reporting using Sysinternals Procmon"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Brian Baskin", email = "brian@thebaskins.com" },
+]
+keywords = ["malware", "sandbox", "procmon", "dfir", "analysis", "ioc"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+dependencies = [
+    "requests>=2.28.0",
+    "yara-python>=4.2.0",
+]
+
+[project.optional-dependencies]
+# Host-side automation front end (NoribenSandbox.py)
+sandbox = [
+    "python-magic>=0.4.27",
+    "pyautogui>=0.9.53",
+]
+# Tooling for contributors
+dev = [
+    "pyflakes",
+    "ruff",
+]
+
+[project.urls]
+Homepage = "https://github.com/Rurik/Noriben"
+Repository = "https://github.com/Rurik/Noriben"
+
+[project.scripts]
+noriben = "Noriben:main"
+
+[tool.setuptools]
+py-modules = ["Noriben", "NoribenRead", "NoribenSandbox"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py38"
+
+[tool.ruff.lint]
+# Keep the default rule set conservative for this long-lived codebase.
+select = ["E", "F", "W"]
+ignore = [
+    "E501",  # long lines are common in the filter/report tables
+    "E722",  # bare except is used intentionally around optional features
+]
