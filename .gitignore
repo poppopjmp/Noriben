@@ -1,0 +1,43 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test / coverage / lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Noriben runtime output
+*.pml
+*.PML
+*_Noriben_*.csv
+*_Noriben_*.txt
+*.vt.json
+*_NoribenReport.zip
+Noriben_*.log
+
+# Secrets — never commit your API key
+virustotal.api
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

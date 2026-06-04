@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: ["master", "main", "dev-*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Syntax & lint (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install lint tooling
+        run: python -m pip install --upgrade pip pyflakes
+
+      - name: Byte-compile all sources
+        run: python -m py_compile Noriben.py NoribenRead.py NoribenSandbox.py
+
+      - name: Run pyflakes
+        run: python -m pyflakes Noriben.py NoribenRead.py NoribenSandbox.py
+
+  install:
+    name: Dependency install check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install libmagic (needed by python-magic)
+        run: sudo apt-get update && sudo apt-get install -y libmagic1
+
+      - name: Install runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Import smoke test
+        run: python -c "import Noriben; print('Noriben', Noriben.__VERSION__)"

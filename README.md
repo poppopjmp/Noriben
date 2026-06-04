@@ -48,9 +48,36 @@ You can automate the script for sandbox-usage. Using -t <seconds> to automate ex
 The --generalize feature will automatically substitute absolute paths with Windows environment paths for better IOC development. For example, C:\Users\malware_user\AppData\Roaming\malware.exe will be automatically resolved to %AppData%\malware.exe.
 
 
+## Requirements & Installation
+
+Noriben requires **Python 3.8+** and the Sysinternals `procmon.exe` (run on the
+Windows analysis VM).
+
+Install the Python dependencies with:
+
+<pre>
+pip install -r requirements.txt
+</pre>
+
+All third-party modules are optional and the script degrades gracefully if one
+is missing:
+
+* `requests` — VirusTotal hash lookups / file submission
+* `yara-python` — `--yara` rule scanning of newly created files
+* `python-magic` + `pyautogui` — only needed for the host automation front end,
+  `NoribenSandbox.py` (`pip install -r requirements.txt` installs these too; on
+  Linux/macOS `python-magic` also needs the native `libmagic` library)
+
+Alternatively, install Noriben as a package (provides a `noriben` console
+command):
+
+<pre>
+pip install .
+</pre>
+
 Usage:
 <pre>
---===[ Noriben v1.7.2
+--===[ Noriben v2.0.1
 --===[ @bbaskin
 usage: Noriben.py [-h] [-c CSV] [-p PML] [-f FILTER] [--hash HASH]
                   [--hashtype {MD5,SHA1,SHA256}] [--headless] [-t TIMEOUT]

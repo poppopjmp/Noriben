@@ -583,7 +583,6 @@ def main():
     Result:
         none
     """
-    global config
     global error_count
     global debug
     global dontrun
@@ -704,7 +703,7 @@ def main():
                 if 'DOS batch' not in magic_result:
                     dontrun = True
                     print('[*] Disabling automatic execution of sample due to magic signature: {}'.format(magic_result))
-            run_file_response = run_file(args, magic_result, args.file)
+            run_file(args, magic_result, args.file)
         else:
             print('[!] Specified file cannot be found: {}'.format(args.file))
             sys.exit(13)
@@ -752,7 +751,7 @@ def main():
                 if magic_result and magic_result.startswith('PE32') and 'DLL' not in magic_result:
                     if debug:
                         print('{}: {}'.format(filename, magic_result))
-                    run_file_response = run_file(args, magic_result, filename)
+                    run_file(args, magic_result, filename)
                 else:
                     print('[*] Directory parsing. File skipped as not an EXE or DLL: {} ({}...)'.format(filename, magic_result[0:50]))
                     continue

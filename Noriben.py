@@ -8,6 +8,15 @@
 # clean text report and timeline
 #
 # Changelog:
+# Version 2.0.1 - June 2025
+#       Maintenance/support refresh:
+#           Fixed crash in NoribenRead.py from leftover Python 2 unicode() call;
+#           now decodes archive bytes correctly on Python 3
+#           Fixed bug where a missing 'requests' module clobbered the stdlib
+#           json module, breaking VirusTotal debug dumps
+#           Cleaned up dead/unused variables flagged by pyflakes
+#           Added requirements.txt, pyproject.toml, .gitignore, and GitHub
+#           Actions CI (byte-compile + pyflakes across Python 3.8-3.12)
 # Version 2.0.0 - August 2023
 #       Major changes to NoribenSandbox host script
 #           Updated many of the functions, such as properly deleting files in guest
@@ -144,11 +153,10 @@ except ImportError:
 
 try:
     import requests
-    import json
 
     has_internet = True
 except ImportError:
-    json = None
+    requests = None
     has_internet = False
 
 try:
@@ -158,7 +166,7 @@ except ImportError:
     configparser = None
 
 # Below are global internal variables. Do not edit these. ################
-__VERSION__ = '2.0.0'
+__VERSION__ = '2.0.1'
 use_pmc = False
 use_virustotal = False
 vt_results = {}
@@ -225,7 +233,6 @@ def read_config(config_filename):
     Returns:
         none
     """
-    global use_virustotal
     global global_approvelist, reg_approvelist, file_approvelist, cmd_approvelist
     global net_approvelist, hash_approvelist
 
@@ -360,7 +367,6 @@ def generalize_vars_init():
                    r'%UserProfile%',
                    r'%WinDir%']
 
-    global path_general_list
     log_debug('[*] Enabling Windows string generalization.')
 
     for env in envvar_list:
@@ -404,7 +410,6 @@ def read_hash_file(hash_filename):
     Arguments:
         hash_filename: path to a text file containing hashes (either flat or sha256deep)
     """
-    global hash_approvelist
     hash_file_handle = open(hash_filename, newline='', encoding='utf-8')
     reader = csv.DictReader(hash_file_handle)
     for hash_line in reader:
@@ -423,9 +428,6 @@ def virustotal_upload_file(path):
     Arguments:
         path: string path to the file to be queried
     """
-    global vt_results
-    global vt_dump
-
     if not has_internet:
         return False
 
@@ -450,21 +452,11 @@ def virustotal_query_hash(hashval, path):
         hashval: string of SHA256 hash to a given file
         path: string path to the file to be queried
     """
-    global vt_results
-    global vt_dump
-
+    # VirusTotal v2 API "response_code" values used below.
+    # (Other documented codes -1, -3..-10 are not acted on by Noriben.)
     VT_NOT_EXIST = 0
     VT_SUCCESS = 1
-    VT_IN_POST_QUEUE = -1
     VT_IN_QUEUE = -2
-    VT_DELETED = -3
-    VT_UNSUPPORTED_FILE = -4
-    VT_UNAVAILABLE = -5
-    VT_REP_MALICIOUS = -6
-    VT_REP_HARMLESS = -7
-    VT_REP_SUSPICIOUS = -8
-    VT_REP_UNDECTEED = -9
-    VT_ERROR = -10
 
     result = ''
 
