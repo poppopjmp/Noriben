@@ -127,6 +127,9 @@ Noriben can turn a run into artifacts you can act on:
 --gen-sigma  Write Sigma detection rules (*.sigma.yml) for dropped executables,
              registry persistence, network endpoints, named pipes, and
              suspicious command lines - each tagged with MITRE ATT&CK
+--navigator  Export a MITRE ATT&CK Navigator layer (*.navigator.json) you can
+             load at mitre-attack.github.io/attack-navigator to visualize the
+             run's technique coverage on the official matrix
 --stix       Export the IOCs as a STIX 2.1 bundle (*.stix.json)
 --misp       Export the IOCs as a MISP event (*.misp.json)
 --diff FILE  Compare this run against a previously saved *.iocs.json baseline.
@@ -142,9 +145,9 @@ python Noriben.py --csv sample_a.csv --json --gen-yara --stix --misp
 python Noriben.py --csv sample_b.csv --diff sample_a.iocs.json
 </pre>
 
-`--gen-yara`, `--gen-sigma`, `--stix`, and `--misp` also have matching
-`gen_yara`, `gen_sigma`, `stix_export`, and `misp_export` keys in
-`Noriben.config`.
+`--gen-yara`, `--gen-sigma`, `--navigator`, `--stix`, and `--misp` also have
+matching `gen_yara`, `gen_sigma`, `navigator_export`, `stix_export`, and
+`misp_export` keys in `Noriben.config`.
 
 ### Consolidating multiple runs
 

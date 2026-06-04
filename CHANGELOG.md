@@ -5,6 +5,14 @@ This fork tracks upstream [Rurik/Noriben](https://github.com/Rurik/Noriben)
 and adds analyst-focused features on top. Versions follow loose semantic
 versioning.
 
+## [3.0.2] - 2026-06-04
+
+### Added
+- **`--navigator`** — export a MITRE ATT&CK Navigator layer (`*.navigator.json`)
+  that can be loaded directly in the official ATT&CK Navigator to visualize the
+  run's technique coverage on the matrix (techniques scored by evidence count).
+- `tests/test_navigator.py` (5 cases). Suite total: 107 tests.
+
 ## [3.0.1] - 2026-06-04
 
 Much broader MITRE ATT&CK mapping.
