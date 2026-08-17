@@ -8,6 +8,11 @@
 # clean text report and timeline
 #
 # Changelog:
+# Version 3.2.2 - 04 Jun 2026 (poppopjmp fork)
+#       Fixed corrupted timeline CSV when reprocessing a PML (--pml). The
+#           timeline rows are pre-formatted CSV strings, but that path passed
+#           them to csv.writerows(), which emitted one column per character.
+#           All three output paths now share a single write_timeline() helper
 # Version 3.2.1 - 04 Jun 2026 (poppopjmp fork)
 #       Performance and robustness:
 #           Approvelist filters are now expanded and compiled once and cached
@@ -292,7 +297,7 @@ except ImportError:
     configparser = None
 
 # Below are global internal variables. Do not edit these. ################
-__VERSION__ = '3.2.1'
+__VERSION__ = '3.2.2'
 use_pmc = False
 use_virustotal = False
 vt_results = {}
@@ -3312,6 +3317,25 @@ def generate_ai_analysis(report_lines, config):
     return content
 
 
+def write_timeline(timeline_file, timeline):
+    """
+    Write the CSV timeline.
+
+    parse_csv() builds `timeline` as a list of pre-formatted CSV row strings,
+    so they are written verbatim. (Passing them to csv.writerows() would treat
+    each string as an iterable of characters and emit one column per
+    character.) All output paths share this helper so they cannot diverge.
+
+    Arguments:
+        timeline_file: path to write the timeline CSV to
+        timeline: list of pre-formatted CSV row strings
+    Returns:
+        none
+    """
+    with codecs.open(timeline_file, 'w', 'utf-8-sig') as timeline_handle:
+        timeline_handle.write('\r\n'.join(timeline))
+
+
 def append_ai_analysis(report, config, ai_file):
     """
     If AI analysis is enabled, generate it, append it to the report list, and
@@ -3593,10 +3617,7 @@ def main():
             codecs.open(txt_file, 'w', 'utf-8-sig').write('\r\n'.join(report))
 
             print('[*] Saving timeline to: {}'.format(timeline_file))
-            # codecs.open(timeline_file, 'w', 'utf-8-sig').write('\r\n'.join(timeline))
-            with open(timeline_file, 'w', newline='', encoding='utf-8-sig') as f:
-                writer = csv.writer(f)
-                writer.writerows(timeline)
+            write_timeline(timeline_file, timeline)
 
             open_file_with_assoc(txt_file)
             terminate_self(0)
@@ -3625,7 +3646,7 @@ def main():
             codecs.open(txt_file, 'w', 'utf-8-sig').write('\r\n'.join(report))
 
             print('[*] Saving timeline to: {}'.format(timeline_file))
-            codecs.open(timeline_file, 'w', 'utf-8-sig').write('\r\n'.join(timeline))
+            write_timeline(timeline_file, timeline)
 
             open_file_with_assoc(txt_file)
             terminate_self(0)
@@ -3738,7 +3759,7 @@ def main():
     codecs.open(txt_file, 'w', 'utf-8').write('\r\n'.join(report))
 
     print('[*] Saving timeline to: {}'.format(timeline_file))
-    codecs.open(timeline_file, 'w', 'utf-8').write('\r\n'.join(timeline))
+    write_timeline(timeline_file, timeline)
 
     open_file_with_assoc(txt_file)
     terminate_self(0)

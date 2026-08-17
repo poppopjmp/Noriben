@@ -70,6 +70,39 @@ class ConsolidatedNavigatorTests(unittest.TestCase):
         self.assertEqual(layer['gradient']['maxValue'], 2)
 
 
+class TimelineWriterTests(unittest.TestCase):
+    """The timeline must be valid CSV on every output path.
+
+    parse_csv() builds pre-formatted CSV row strings; feeding those to
+    csv.writerows() emits one column per character, which silently corrupted
+    the timeline on the --pml path.
+    """
+
+    ROWS = ['1:01:01,Process,CreateProcess,mal.exe,1234,C:\\evil.exe,5678',
+            '1:01:02,Registry,RegSetValue,mal.exe,1234,HKCU\\Run\\E,  =  x']
+
+    def test_timeline_round_trips_as_csv(self):
+        import csv
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'tl.csv')
+            Noriben.write_timeline(path, self.ROWS)
+            with open(path, encoding='utf-8-sig', newline='') as handle:
+                parsed = list(csv.reader(handle))
+        self.assertEqual(len(parsed), len(self.ROWS))
+        # 7 real columns, not one column per character
+        self.assertEqual([len(row) for row in parsed], [7, 7])
+        self.assertEqual(parsed[0][3], 'mal.exe')
+        self.assertEqual(parsed[0][5], 'C:\\evil.exe')
+
+    def test_empty_timeline_is_safe(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'tl.csv')
+            Noriben.write_timeline(path, [])
+            self.assertTrue(os.path.exists(path))
+
+
 class SelfTestTests(unittest.TestCase):
     def test_selftest_passes(self):
         self.assertTrue(Noriben.run_selftest())

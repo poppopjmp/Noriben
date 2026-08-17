@@ -5,6 +5,17 @@ This fork tracks upstream [Rurik/Noriben](https://github.com/Rurik/Noriben)
 and adds analyst-focused features on top. Versions follow loose semantic
 versioning.
 
+## [3.2.2] - 2026-06-04
+
+### Fixed
+- **Corrupted timeline CSV when reprocessing a PML (`--pml`).** `parse_csv()`
+  builds the timeline as pre-formatted CSV row strings, but that path passed
+  them to `csv.writerows()`, which treats each string as an iterable of
+  characters — producing one column per character instead of a usable timeline.
+  All three output paths now share a single `write_timeline()` helper so they
+  cannot diverge again, with a round-trip test asserting the output parses back
+  to the expected columns.
+
 ## [3.2.1] - 2026-06-04
 
 Performance and robustness hardening.
