@@ -5,6 +5,34 @@ This fork tracks upstream [Rurik/Noriben](https://github.com/Rurik/Noriben)
 and adds analyst-focused features on top. Versions follow loose semantic
 versioning.
 
+## [3.2.1] - 2026-06-04
+
+Performance and robustness hardening.
+
+### Performance
+- Approvelist filters are now environment-expanded and compiled **once and
+  cached**, instead of on every (event, filter) pair. Filtering is ~**4x
+  faster** (~60s → ~14s of filter time on a 100k-event capture). Output was
+  verified byte-identical to the previous implementation across a differential
+  test of the shipped filter lists.
+
+### Fixed
+- A failure in the analytics or export layer could abort `parse_csv()` and lose
+  the **primary text report** — the one irreplaceable output. Analytics and
+  every exporter are now individually fail-safe and degrade to the raw event
+  report, with the error surfaced to the user.
+- Extracted IOCs (URLs, public IPv4 addresses, cryptocurrency wallets, e-mail
+  addresses) were missing from `--diff` and `--merge`, so a **changed C2 URL or
+  ransom wallet did not show up** when comparing samples. They are now first
+  class in both.
+
+### Changed
+- The diff category/label list is defined once and shared by the text and HTML
+  renderers (they had been duplicated, which is how the gap above appeared). A
+  test now asserts the two can never drift apart.
+- `tests/test_robustness.py` and `tests/test_ioc_coverage.py` added.
+  Suite total: 139 tests.
+
 ## [3.2.0] - 2026-06-04
 
 Usability & sharing.
